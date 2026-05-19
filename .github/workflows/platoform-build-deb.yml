@@ -1,0 +1,155 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: Build and publish .deb packages
+
+on:
+  push:
+    branches:
+      - "4.22"
+      - "4.22-testing"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: platoform-build-deb-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Build runs on:
+    #   - release publish (stable)
+    #   - push to 4.22-testing (continuous testing)
+    #   - manual workflow_dispatch on any branch
+    # NOT on plain push to 4.22 — that only refreshes the release draft.
+    if: >-
+      github.event_name == 'release' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref_name == '4.22-testing')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up JDK 17 for Maven
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+
+      - name: Install Debian build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            openjdk-17-jdk-headless maven nodejs build-essential \
+            dpkg-dev debhelper genisoimage lsb-release devscripts \
+            python3-setuptools python3-mysql.connector
+
+      - name: Build .deb packages
+        env:
+          ACS_BUILD_OPTS: -DskipTests=true
+          NODE_OPTIONS: --openssl-legacy-provider
+        run: ./packaging/build-deb.sh --brand platoform --use-timestamp --output-directory dist
+
+      - name: Upload .deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudstack-debs
+          path: dist/*.deb
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cloudstack-debs
+          path: dist
+
+      - name: Determine channel
+        id: channel
+        # release → noble (stable); anything else (push to 4.22-testing,
+        # workflow_dispatch from any branch) → noble-testing unless dispatched
+        # from 4.22 explicitly.
+        run: |
+          if [ "${{ github.event_name }}" = "release" ] \
+             || [ "${{ github.ref_name }}" = "4.22" ]; then
+            echo "dist=noble" >> "$GITHUB_OUTPUT"
+          else
+            echo "dist=noble-testing" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import GPG signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.PLATOFORM_APT_GPG_PRIVATE_KEY }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          FPR=$(gpg --list-keys --with-colons admin@platoform.net | awk -F: '/^fpr/{print $10; exit}')
+          echo "GPG_FINGERPRINT=$FPR" >> "$GITHUB_ENV"
+
+      - name: Install deb-s3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby
+          sudo gem install deb-s3 --no-document
+
+      - name: Publish to apt repo
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-west-2
+        run: |
+          deb-s3 upload \
+            --bucket=platoform-apt \
+            --codename=${{ steps.channel.outputs.dist }} \
+            --component=main \
+            --sign=$GPG_FINGERPRINT \
+            --arch=amd64 \
+            --visibility=private \
+            dist/*.deb
+
+      - name: Invalidate CloudFront
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-west-2
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/dists/${{ steps.channel.outputs.dist }}/*"
+
+  # Runs independently of build/publish: pushes to 4.22 only refresh the
+  # release draft. Publishing the draft (release: published event above)
+  # is what actually triggers the build + apt publish to noble.
+  release-draft:
+    if: github.event_name == 'push' && github.ref_name == '4.22'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: release-drafter/release-drafter@v6
+        with:
+          commitish: 4.22
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
