@@ -110,8 +110,8 @@ jobs:
       - name: Install deb-s3
         run: |
           sudo apt-get update
-          sudo apt-get install -y ruby
-          sudo gem install deb-s3 --no-document
+          sudo apt-get install -y ruby libbz2-dev
+          sudo gem install deb-s3 bzip2-ffi --no-document
 
       - name: Publish to apt repo
         env:
