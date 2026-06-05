@@ -316,7 +316,7 @@ sudo qemu-img convert \
 #### Step 4: Update Database
 Point the volume record to the unencrypted copy and clear encryption flags:
 ```sql
-UPDATE volumes 
+UPDATE volumes
 SET path = 'NEW_UNENCRYPTED_FILENAME',
     passphrase_id = NULL,
     encrypt_format = NULL,
@@ -470,4 +470,3 @@ For more detailed information on specific topics, see the following documents:
 - **Resource Management**: [RESOURCE_MANAGEMENT.md](RESOURCE_MANAGEMENT.md) - Resource quotas, limits, and capacity management
 - **Network Architecture**: [NETWORK_ARCHITECTURE.md](NETWORK_ARCHITECTURE.md) - Network configuration, redundancy, and troubleshooting
 - **Virtual Router Management**: [VR_MANAGEMENT.md](VR_MANAGEMENT.md) - VR customization, iptables management, and advanced configurations
-
