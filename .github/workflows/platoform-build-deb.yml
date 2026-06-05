@@ -46,7 +46,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up JDK 17 for Maven
         uses: actions/setup-java@v4
@@ -63,11 +64,33 @@ jobs:
             dpkg-dev debhelper genisoimage lsb-release devscripts \
             python3-setuptools python3-mysql.connector
 
+      - name: Determine build version
+        id: ver
+        # Bake the version from git so artifacts are reproducible and sortable.
+        # Always carries -testing so testing artifacts never collide with prod.
+        # Brand is baked in here too because build-deb.sh's --brand truncates
+        # everything after the first dash in the POM version (cut -d - -f 1).
+        run: |
+          TAG=$(git describe --tags --match '4.22.*' --abbrev=0 2>/dev/null || echo "4.22.0")
+          DESC=$(git describe --tags --match '4.22.*' --always)
+          BASE="${TAG}.0"
+          if [ "$DESC" = "$TAG" ]; then
+            VER="${BASE}-testing-platoform"
+          else
+            SUFFIX="${DESC#${TAG}-}"
+            VER="${BASE}-testing-${SUFFIX}-platoform"
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VER"
+
+      - name: Pin POM version
+        run: ./tools/build/setnextversion.sh --version ${{ steps.ver.outputs.version }} --sourcedir . --branch 4.22-testing --no-commit
+
       - name: Build .deb packages
         env:
           ACS_BUILD_OPTS: -DskipTests=true
           NODE_OPTIONS: --openssl-legacy-provider
-        run: ./packaging/build-deb.sh --brand platoform --use-timestamp --output-directory dist
+        run: ./packaging/build-deb.sh --output-directory dist
 
       - name: Upload .deb artifacts
         uses: actions/upload-artifact@v4
@@ -110,8 +133,8 @@ jobs:
       - name: Install deb-s3
         run: |
           sudo apt-get update
-          sudo apt-get install -y ruby libbz2-dev
-          sudo gem install deb-s3 bzip2-ffi --no-document
+          sudo apt-get install -y ruby
+          sudo gem install deb-s3 --no-document
 
       - name: Publish to apt repo
         env:
