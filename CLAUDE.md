@@ -113,6 +113,19 @@ docker run --rm -v "$(pwd):/src" --workdir /src ubuntu:24.04 bash -c "
 
 Output lands in `dist/`. Publish manually via `platrol-panel/pulumi/aptrepo/Makefile`'s `make add`.
 
+### Lint before pushing
+
+CI runs the upstream Apache pre-commit suite (codespell, trailing-whitespace, end-of-file-fixer, yamllint, markdownlint, flake8, gitleaks, …). Run it locally before pushing to avoid red PRs:
+
+```sh
+pip install -r requirements-dev.txt   # first time only, installs pre-commit
+pre-commit run --all-files            # lint everything
+# or scoped:
+pre-commit run --files <path1> <path2>
+```
+
+If codespell flags a real project-specific word (`platoform`, `fpr`, etc.), add the lowercase form to `.github/linters/codespell.txt` rather than skipping the hook. Full guide: [`PRE-COMMIT.md`](./PRE-COMMIT.md).
+
 ### Don't
 
 - Don't push to `origin` (Apache upstream)
