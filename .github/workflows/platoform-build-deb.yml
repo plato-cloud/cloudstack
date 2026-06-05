@@ -70,15 +70,22 @@ jobs:
         # Always carries -testing so testing artifacts never collide with prod.
         # Brand is baked in here too because build-deb.sh's --brand truncates
         # everything after the first dash in the POM version (cut -d - -f 1).
+        # Uses `git tag --list` (not describe --tags) because release tags may
+        # live on 4.22 and not be ancestors of 4.22-testing.
         run: |
-          TAG=$(git describe --tags --match '4.22.*' --abbrev=0 2>/dev/null || echo "4.22.0")
-          DESC=$(git describe --tags --match '4.22.*' --always)
-          BASE="${TAG}.0"
-          if [ "$DESC" = "$TAG" ]; then
-            VER="${BASE}-testing-platoform"
+          TAG=$(git tag --list 'v4.22.*' --sort=-version:refname | head -n1)
+          TAG="${TAG:-v4.22.0}"
+          BASE="${TAG#v}.0"
+          SHA=$(git rev-parse --short=8 HEAD)
+          if git merge-base --is-ancestor "$TAG" HEAD 2>/dev/null; then
+            COUNT=$(git rev-list --count "$TAG..HEAD")
+            if [ "$COUNT" -eq 0 ]; then
+              VER="${BASE}-testing-platoform"
+            else
+              VER="${BASE}-testing-${COUNT}-g${SHA}-platoform"
+            fi
           else
-            SUFFIX="${DESC#${TAG}-}"
-            VER="${BASE}-testing-${SUFFIX}-platoform"
+            VER="${BASE}-testing-g${SHA}-platoform"
           fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "Building version: $VER"
