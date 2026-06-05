@@ -24,7 +24,6 @@ on:
       - "4.22-testing"
   release:
     types: [published]
-  workflow_dispatch:
 
 concurrency:
   group: platoform-build-deb-${{ github.ref }}
@@ -32,15 +31,9 @@ concurrency:
 
 jobs:
   build:
-    # Build runs on:
-    #   - release publish (stable)
-    #   - push to 4.22-testing (continuous testing)
-    #   - manual workflow_dispatch on any branch
-    # NOT on plain push to 4.22 — that only refreshes the release draft.
-    if: >-
-      github.event_name == 'release' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref_name == '4.22-testing')
+    # Build runs on release publish (-> noble) and push to 4.22-testing
+    # (-> noble-testing). Plain push to 4.22 only refreshes the release draft.
+    if: github.event_name == 'release' || github.ref_name == '4.22-testing'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -67,25 +60,29 @@ jobs:
       - name: Determine build version
         id: ver
         # Bake the version from git so artifacts are reproducible and sortable.
-        # Always carries -testing so testing artifacts never collide with prod.
-        # Brand is baked in here too because build-deb.sh's --brand truncates
-        # everything after the first dash in the POM version (cut -d - -f 1).
-        # Uses `git tag --list` (not describe --tags) because release tags may
-        # live on 4.22 and not be ancestors of 4.22-testing.
+        # Release events emit a clean prod version; testing pushes carry
+        # -testing plus commits-ahead + SHA so every build is unique.
+        # Brand is baked in here because build-deb.sh's --brand truncates
+        # everything after the first dash in the POM version.
         run: |
-          TAG=$(git tag --list 'v4.22.*' --sort=-version:refname | head -n1)
-          TAG="${TAG:-v4.22.0}"
-          BASE="${TAG#v}.0"
-          SHA=$(git rev-parse --short=8 HEAD)
-          if git merge-base --is-ancestor "$TAG" HEAD 2>/dev/null; then
-            COUNT=$(git rev-list --count "$TAG..HEAD")
-            if [ "$COUNT" -eq 0 ]; then
-              VER="${BASE}-testing-platoform"
-            else
-              VER="${BASE}-testing-${COUNT}-g${SHA}-platoform"
-            fi
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+            VER="${TAG#v}.0-platoform"
           else
-            VER="${BASE}-testing-g${SHA}-platoform"
+            TAG=$(git tag --list 'v4.22.*' --sort=-version:refname | head -n1)
+            TAG="${TAG:-v4.22.0}"
+            BASE="${TAG#v}.0"
+            SHA=$(git rev-parse --short=8 HEAD)
+            if git merge-base --is-ancestor "$TAG" HEAD 2>/dev/null; then
+              COUNT=$(git rev-list --count "$TAG..HEAD")
+              if [ "$COUNT" -eq 0 ]; then
+                VER="${BASE}-testing-platoform"
+              else
+                VER="${BASE}-testing-${COUNT}-g${SHA}-platoform"
+              fi
+            else
+              VER="${BASE}-testing-g${SHA}-platoform"
+            fi
           fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "Building version: $VER"
@@ -118,12 +115,8 @@ jobs:
 
       - name: Determine channel
         id: channel
-        # release → noble (stable); anything else (push to 4.22-testing,
-        # workflow_dispatch from any branch) → noble-testing unless dispatched
-        # from 4.22 explicitly.
         run: |
-          if [ "${{ github.event_name }}" = "release" ] \
-             || [ "${{ github.ref_name }}" = "4.22" ]; then
+          if [ "${{ github.event_name }}" = "release" ]; then
             echo "dist=noble" >> "$GITHUB_OUTPUT"
           else
             echo "dist=noble-testing" >> "$GITHUB_OUTPUT"
