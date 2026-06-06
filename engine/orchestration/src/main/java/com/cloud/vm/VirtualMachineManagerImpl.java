@@ -5241,7 +5241,7 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
                 vm.setServiceOfferingId(oldServiceOffering.getId());
                 _capacityMgr.releaseVmCapacity(vm, false, false, vm.getHostId());
                 vm.setServiceOfferingId(newServiceOffering.getId());
-                _capacityMgr.allocateVmCapacity(vm, false);
+                _capacityMgr.allocateVmCapacity(vm);
             }
 
         } catch (final OperationTimedoutException e) {

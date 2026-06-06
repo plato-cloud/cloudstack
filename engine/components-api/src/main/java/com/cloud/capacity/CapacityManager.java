@@ -133,9 +133,9 @@ public interface CapacityManager {
             "capacity.calculate.workers", "1",
             "Number of worker threads to be used for capacities calculation", true);
 
-    public boolean releaseVmCapacity(VirtualMachine vm, boolean moveFromReserved, boolean moveToReservered, Long hostId);
+    public boolean releaseVmCapacity(VirtualMachine vm, boolean moveFromReserved, boolean moveToReserved, Long hostId);
 
-    void allocateVmCapacity(VirtualMachine vm, boolean fromLastHost);
+    void allocateVmCapacity(VirtualMachine vm);
 
     /**
      * @param hostId Id of the host to check capacity
