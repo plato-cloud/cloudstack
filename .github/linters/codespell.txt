@@ -84,6 +84,7 @@ cna
 collison
 comman
 commited
+commitish
 comparision
 comparisions
 complient
@@ -217,6 +218,7 @@ fisrt
 fo
 folowing
 fowarding
+fpr
 frist
 fro
 frontent
@@ -352,6 +354,7 @@ passowrd
 perfromed
 permissble
 physcial
+platoform
 plugable
 pluging
 polcies
