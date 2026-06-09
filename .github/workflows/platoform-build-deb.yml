@@ -91,9 +91,15 @@ jobs:
 
       - name: Pin POM version
         run: |
-          mvn versions:set -DnewVersion=${{ steps.ver.outputs.version }} \
+          VER='${{ steps.ver.outputs.version }}'
+          CURRENT=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          mvn versions:set -DnewVersion="$VER" \
             -P vmware,developer,systemvm,simulator -Dnoredist \
             versions:commit -B
+          # tools/checkstyle/ is not in the reactor — bump it directly
+          (cd tools/checkstyle && mvn versions:set -DnewVersion="$VER" versions:commit -B)
+          # Non-POM version refs the reactor doesn't touch
+          perl -pi -e "s/\Q$CURRENT\E/$VER/g" debian/changelog tools/marvin/setup.py
 
       - name: Build .deb packages
         env:
