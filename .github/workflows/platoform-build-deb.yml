@@ -90,7 +90,10 @@ jobs:
           echo "Building version: $VER"
 
       - name: Pin POM version
-        run: ./tools/build/setnextversion.sh --version ${{ steps.ver.outputs.version }} --sourcedir . --branch 4.22-testing --no-commit
+        run: |
+          mvn versions:set -DnewVersion=${{ steps.ver.outputs.version }} \
+            -P vmware,developer,systemvm,simulator -Dnoredist \
+            versions:commit -B
 
       - name: Build .deb packages
         env:
