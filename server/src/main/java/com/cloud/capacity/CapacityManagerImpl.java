@@ -179,9 +179,6 @@ public class CapacityManagerImpl extends ManagerBase implements CapacityManager,
             return true;
         }
         HostVO host = _hostDao.findById(hostId);
-        if (HypervisorType.External.equals(host.getHypervisorType())) {
-            return true;
-        }
         return releaseVmCapacity(vm, moveFromReserved, moveToReserved, host);
     }
 
@@ -949,9 +946,9 @@ public class CapacityManagerImpl extends ManagerBase implements CapacityManager,
       State oldState = transition.getCurrentState();
       State newState = transition.getToState();
       Event event = transition.getEvent();
-      Host lastHost = _hostDao.findById(vm.getLastHostId());
-      Host oldHost = _hostDao.findById(oldHostId);
-      Host newHost = _hostDao.findById(vm.getHostId());
+      Host lastHost = vm.getLastHostId() != null ? _hostDao.findById(vm.getLastHostId()) : null;
+      Host oldHost = oldHostId != null ? _hostDao.findById(oldHostId) : null;
+      Host newHost = vm.getHostId() != null ? _hostDao.findById(vm.getHostId()) : null;
       logger.debug("{} state transited from [{}] to [{}] with event [{}]. VM's original host: {}, new host: {}, host before state transition: {}",
               vm, oldState, newState, event, lastHost, newHost, oldHost);
 
@@ -993,9 +990,7 @@ public class CapacityManagerImpl extends ManagerBase implements CapacityManager,
       }
 
       if ((newState == State.Starting || newState == State.Migrating || event == Event.AgentReportMigrated) && vm.getHostId() != null) {
-        if (vm.getLastHostId() != null) {
-          releaseVmCapacity(vm, true, false, vm.getLastHostId());
-        }
+        releaseVmCapacity(vm, true, false, lastHost);
         allocateVmCapacity(vm);
       }
 
