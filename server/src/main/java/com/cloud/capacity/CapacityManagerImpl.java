@@ -946,9 +946,9 @@ public class CapacityManagerImpl extends ManagerBase implements CapacityManager,
       State oldState = transition.getCurrentState();
       State newState = transition.getToState();
       Event event = transition.getEvent();
-      Host lastHost = vm.getLastHostId() != null ? _hostDao.findById(vm.getLastHostId()) : null;
-      Host oldHost = oldHostId != null ? _hostDao.findById(oldHostId) : null;
-      Host newHost = vm.getHostId() != null ? _hostDao.findById(vm.getHostId()) : null;
+      Host lastHost = _hostDao.findById(vm.getLastHostId());
+      Host oldHost = _hostDao.findById(oldHostId);
+      Host newHost = _hostDao.findById(vm.getHostId());
       logger.debug("{} state transited from [{}] to [{}] with event [{}]. VM's original host: {}, new host: {}, host before state transition: {}",
               vm, oldState, newState, event, lastHost, newHost, oldHost);
 
