@@ -3689,7 +3689,7 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
                 disk.setLogicalBlockIOSize(pool.getSupportedLogicalBlockSize());
                 disk.setPhysicalBlockIOSize(pool.getSupportedPhysicalBlockSize());
 
-                if (diskBusType == DiskDef.DiskBus.SCSI || diskBusType == DiskDef.DiskBus.VIRTIOBLK) {
+                if (diskBusSupportsDiscard(diskBusType)) {
                     disk.setQemuDriver(true);
                     disk.setDiscard(DiscardType.UNMAP);
                 }
@@ -3886,6 +3886,10 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
         return diskBus != DiskDef.DiskBus.IDE || getHypervisorQemuVersion() >= HYPERVISOR_QEMU_VERSION_IDE_DISCARD_FIXED;
     }
 
+    protected boolean diskBusSupportsDiscard(DiskDef.DiskBus diskBus) {
+        return diskBus == DiskDef.DiskBus.SCSI || diskBus == DiskDef.DiskBus.VIRTIO || diskBus == DiskDef.DiskBus.VIRTIOBLK;
+    }
+
     public boolean isUbuntuOrDebianHost() {
         Map<String, String> versionString = getVersionStrings();
         String hostKey = "Host.OS";
@@ -4079,7 +4083,7 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
                 }
 
                 diskdef = new DiskDef();
-                if (busT == DiskDef.DiskBus.SCSI) {
+                if (diskBusSupportsDiscard(busT)) {
                     diskdef.setQemuDriver(true);
                     diskdef.setDiscard(DiscardType.UNMAP);
                 }
