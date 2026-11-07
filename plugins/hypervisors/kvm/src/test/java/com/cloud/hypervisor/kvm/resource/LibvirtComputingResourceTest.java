@@ -6595,6 +6595,7 @@ public class LibvirtComputingResourceTest {
                 "/mnt/02e0e152-5462-31a9-b8c6-35e3760dc6b4/9ebe53c1-3d35-46e5-b7aa-6fc223ba0fcf");
         final String name = to.getName();
         final Map<String, String> vmToDetails = to.getDetails();
+        Mockito.doNothing().when(libvirtComputingResourceSpy).setBackingFileFormat(Mockito.anyString());
 
         vmToDetails.put(VmDetailConstants.ROOT_DISK_CONTROLLER, DiskDef.DiskBus.VIRTIO.name());
         {
