@@ -55,6 +55,7 @@ public interface Host extends StateObject<Status>, Identity, Partition, HAResour
     }
 
     String HOST_UEFI_ENABLE = "host.uefi.enable";
+    String HOST_KVM_DISK_ONLY_VM_SNAPSHOT_NVRAM = "host.kvm.diskonlyvmsnapshot.nvram";
     String HOST_VOLUME_ENCRYPTION = "host.volume.encryption";
     String HOST_INSTANCE_CONVERSION = "host.instance.conversion";
     String HOST_VDDK_SUPPORT = "host.vddk.support";
@@ -63,6 +64,7 @@ public interface Host extends StateObject<Status>, Identity, Partition, HAResour
     String HOST_OVFTOOL_VERSION = "host.ovftool.version";
     String HOST_VIRTV2V_VERSION = "host.virtv2v.version";
     String HOST_SSH_PORT = "host.ssh.port";
+    String HOST_CPU_MAX_SPEED_MHZ = "host.cpu.max.speed.mhz";
 
     int DEFAULT_SSH_PORT = 22;
 

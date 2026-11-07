@@ -317,6 +317,25 @@ public class QemuImgTest {
     }
 
     @Test
+    public void testCreateWithBackingFileOfOtherFormat() throws QemuImgException, LibvirtException {
+        String backingFileName = "/tmp/" + UUID.randomUUID() + ".raw";
+        String overlayFileName = "/tmp/" + UUID.randomUUID() + ".qcow2";
+
+        QemuImgFile backingFile = new QemuImgFile(backingFileName, 20480, PhysicalDiskFormat.RAW);
+        QemuImgFile overlayFile = new QemuImgFile(overlayFileName, 20480, PhysicalDiskFormat.QCOW2);
+
+        QemuImg qemu = new QemuImg(0);
+        qemu.create(backingFile);
+        qemu.create(overlayFile, backingFile);
+
+        // the created file keeps its own format, the backing file's format is only passed as -F
+        Map<String, String> info = qemu.info(overlayFile);
+        assertEquals(PhysicalDiskFormat.QCOW2.toString(), info.get(QemuImg.FILE_FORMAT));
+        assertEquals(backingFileName, info.get(QemuImg.BACKING_FILE));
+        assertEquals(PhysicalDiskFormat.RAW.toString(), info.get(QemuImg.BACKING_FILE_FORMAT));
+    }
+
+    @Test
     public void testConvertBasic() throws QemuImgException, LibvirtException {
         long srcSize = 20480;
         String srcFileName = "/tmp/" + UUID.randomUUID() + ".qcow2";
@@ -388,6 +407,21 @@ public class QemuImgTest {
         Assert.assertTrue("should support luks", QemuImg.helpSupportsImageFormat(partialHelp, PhysicalDiskFormat.LUKS));
         Assert.assertTrue("should support qcow2", QemuImg.helpSupportsImageFormat(partialHelp, PhysicalDiskFormat.QCOW2));
         Assert.assertFalse("should not support http", QemuImg.helpSupportsImageFormat(partialHelp, PhysicalDiskFormat.SHEEPDOG));
+    }
+
+    @Test
+    public void testHelpSupportsImageFormatQemu101Header() throws QemuImgException, LibvirtException {
+        // qemu-img 10.1.0 (e.g. RHEL 9.8: qemu-kvm-10.1.0-17.el9_8.3) changed the
+        // help header from "Supported formats:" to "Supported image formats:"
+        String help = "Supported image formats:\n" +
+                "  blkdebug blklogwrites blkverify compress copy-before-write copy-on-read\n" +
+                "  file ftp ftps host_cdrom host_device http https io_uring luks nbd null-aio\n" +
+                "  null-co nvme nvme-io_uring preallocate qcow2 quorum raw rbd\n" +
+                "  snapshot-access throttle vdi vhdx virtio-blk-vfio-pci\n" +
+                "  virtio-blk-vhost-user virtio-blk-vhost-vdpa vmdk vpc\n";
+        Assert.assertTrue("should support luks", QemuImg.helpSupportsImageFormat(help, PhysicalDiskFormat.LUKS));
+        Assert.assertTrue("should support qcow2", QemuImg.helpSupportsImageFormat(help, PhysicalDiskFormat.QCOW2));
+        Assert.assertFalse("should not support sheepdog", QemuImg.helpSupportsImageFormat(help, PhysicalDiskFormat.SHEEPDOG));
     }
 
     @Test
