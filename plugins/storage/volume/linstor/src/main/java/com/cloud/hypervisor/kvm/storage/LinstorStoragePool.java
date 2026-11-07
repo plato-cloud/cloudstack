@@ -24,6 +24,7 @@ import com.cloud.agent.properties.AgentProperties;
 import com.cloud.agent.properties.AgentPropertiesFileHandler;
 import com.cloud.hypervisor.kvm.resource.KVMHABase.HAStoragePool;
 import com.cloud.storage.Storage;
+import com.cloud.utils.Pair;
 import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.utils.script.OutputInterpreter;
 import com.cloud.utils.script.Script;
@@ -33,6 +34,7 @@ import com.google.gson.JsonIOException;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonSyntaxException;
+import org.apache.cloudstack.storage.datastore.util.LinstorUtil;
 import org.apache.cloudstack.utils.qemu.QemuImg;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -46,16 +48,18 @@ public class LinstorStoragePool implements KVMStoragePool {
     private final Storage.StoragePoolType _storagePoolType;
     private final StorageAdaptor _storageAdaptor;
     private final String _resourceGroup;
+    private final boolean _insecureSsl;
     private final String localNodeName;
 
     public LinstorStoragePool(String uuid, String host, int port, String resourceGroup,
-                              Storage.StoragePoolType storagePoolType, StorageAdaptor storageAdaptor) {
+                              Storage.StoragePoolType storagePoolType, StorageAdaptor storageAdaptor, boolean insecureSsl) {
         _uuid = uuid;
         _sourceHost = host;
         _sourcePort = port;
         _storagePoolType = storagePoolType;
         _storageAdaptor = storageAdaptor;
         _resourceGroup = resourceGroup;
+        _insecureSsl = insecureSsl;
         localNodeName = getHostname();
     }
 
@@ -213,6 +217,10 @@ public class LinstorStoragePool implements KVMStoragePool {
         return _resourceGroup;
     }
 
+    public boolean isInsecureSsl() {
+        return _insecureSsl;
+    }
+
     @Override
     public boolean isPoolSupportHA() {
         return true;
@@ -366,6 +374,25 @@ public class LinstorStoragePool implements KVMStoragePool {
             }
         }
         return false;
+    }
+
+    /**
+     * Thin LVM and ZFS backed resources start out unallocated and read as zeroes, thick LVM hands out
+     * whatever was on the disk before.
+     */
+    @Override
+    public boolean newVolumeReadsAsZero(String volumeUuid) {
+        return LinstorUtil.resourceSupportZeroBlocks(this, LinstorUtil.RSC_PREFIX + volumeUuid);
+    }
+
+    @Override
+    public Pair<String, List<String>> createBackupScratch(String vmName, List<Long> sizes) {
+        return ((LinstorStorageAdaptor) _storageAdaptor).createBackupScratch(this, vmName, sizes);
+    }
+
+    @Override
+    public void deleteBackupScratch(String name) {
+        ((LinstorStorageAdaptor) _storageAdaptor).deleteBackupScratch(this, name);
     }
 
     @Override

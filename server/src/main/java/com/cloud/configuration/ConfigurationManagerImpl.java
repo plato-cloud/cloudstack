@@ -98,6 +98,7 @@ import org.apache.cloudstack.config.Configuration;
 import org.apache.cloudstack.context.CallContext;
 import org.apache.cloudstack.engine.orchestration.service.NetworkOrchestrationService;
 import org.apache.cloudstack.engine.orchestration.service.VolumeOrchestrationService;
+import org.apache.cloudstack.engine.subsystem.api.storage.TemplateService;
 import org.apache.cloudstack.engine.subsystem.api.storage.ZoneScope;
 import org.apache.cloudstack.framework.config.ConfigDepot;
 import org.apache.cloudstack.framework.config.ConfigKey;
@@ -457,6 +458,8 @@ public class ConfigurationManagerImpl extends ManagerBase implements Configurati
     AffinityGroupService _affinityGroupService;
     @Inject
     StorageManager _storageManager;
+    @Inject
+    TemplateService _templateService;
     @Inject
     ImageStoreDao _imageStoreDao;
     @Inject
@@ -3163,6 +3166,12 @@ public class ConfigurationManagerImpl extends ManagerBase implements Configurati
                 // Create default system networks
                 createDefaultSystemNetworks(zone.getId());
 
+                // Associate cross zone templates with the Edge Zones here because they don't have SSVMs
+                // For Core zones, this happens when the SSVM starts up.
+                if (isEdge) {
+                    _templateService.associateCrossZoneTemplatesToZone(zone.getId());
+                }
+
                 return zone;
             }
         });
@@ -5666,7 +5675,7 @@ public class ConfigurationManagerImpl extends ManagerBase implements Configurati
         Long domainId = domainMap != null ? domainMap.getDomainId() : null;
 
         final Boolean isRangeForSystemVM = checkIfVlanRangeIsForSystemVM(id);
-        if (forSystemVms != null && isRangeForSystemVM != forSystemVms) {
+        if (forSystemVms != null && !isRangeForSystemVM.equals(forSystemVms)) {
             if (VlanType.DirectAttached.equals(vlanRange.getVlanType())) {
                 throw new InvalidParameterValueException("forSystemVms is not available for this IP range with vlan type: " + VlanType.DirectAttached);
             }
@@ -8269,7 +8278,7 @@ public class ConfigurationManagerImpl extends ManagerBase implements Configurati
             if (offering.getVmType() != null && offering.getVmType().equalsIgnoreCase(VirtualMachine.Type.DomainRouter.toString())) {
                 networkRate = NetworkOrchestrationService.NetworkThrottlingRate.valueIn(dataCenterId);
             } else {
-                networkRate = Integer.parseInt(_configDao.getValue(Config.VmNetworkThrottlingRate.key()));
+                networkRate = NetworkOrchestrationService.VmNetworkThrottlingRate.valueIn(dataCenterId);
             }
         }
 
