@@ -24,6 +24,7 @@ on:
       - "4.22-testing"
   release:
     types: [published]
+  workflow_dispatch:
 
 concurrency:
   group: platoform-build-deb-${{ github.ref }}
