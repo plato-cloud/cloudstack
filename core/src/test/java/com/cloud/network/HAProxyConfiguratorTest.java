@@ -106,8 +106,9 @@ public class HAProxyConfiguratorTest {
 
         LoadBalancerConfigCommand cmd = new LoadBalancerConfigCommand(lba, "10.0.0.1", "10.1.0.1", "10.1.1.1", null, 1L, "4", true, 0L);
         String result = genConfig(hpg, cmd);
-        assertTrue("idleTimeout of 0 should not generate 'timeout server' in the resulting haproxy config", !result.contains("\ttimeout server"));
-        assertTrue("idleTimeout of 0 should not generate 'timeout client' in the resulting haproxy config", !result.contains("\ttimeout client"));
+        assertTrue("idleTimeout of 0 should not generate 'timeout server' in the resulting haproxy config", !result.contains("\ttimeout server "));
+        assertTrue("idleTimeout of 0 should not generate 'timeout client' in the resulting haproxy config", !result.contains("\ttimeout client "));
+        assertTrue("half-closed sessions should stay bounded when idleTimeout is 0", result.contains("\ttimeout client-fin") && result.contains("\ttimeout server-fin"));
 
         cmd = new LoadBalancerConfigCommand(lba, "10.0.0.1", "10.1.0.1", "10.1.1.1", null, 1L, "4", true, 1234L);
         result = genConfig(hpg, cmd);
