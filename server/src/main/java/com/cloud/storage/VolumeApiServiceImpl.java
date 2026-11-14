@@ -256,6 +256,9 @@ import com.google.gson.JsonParseException;
 public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiService, VmWorkJobHandler, Configurable {
     public static final String VM_WORK_JOB_HANDLER = VolumeApiServiceImpl.class.getSimpleName();
 
+    protected static final Set<Storage.StoragePoolType> ENCRYPTED_VOLUME_MIGRATION_POOL_TYPES = Set.of(
+            Storage.StoragePoolType.NetworkFilesystem, Storage.StoragePoolType.Filesystem, Storage.StoragePoolType.SharedMountPoint);
+
     @Inject
     private UserVmManager _userVmMgr;
     @Inject
@@ -3508,7 +3511,8 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
             }
         }
 
-        if (vol.getPassphraseId() != null && !srcAndDestOnStorPool && !srcStoragePoolVO.getPoolType().equals(Storage.StoragePoolType.PowerFlex)) {
+        if (vol.getPassphraseId() != null && !srcAndDestOnStorPool && !srcStoragePoolVO.getPoolType().equals(Storage.StoragePoolType.PowerFlex)
+                && !isOfflineKvmFileBasedEncryptedVolumeMigration(hypervisorType, srcStoragePoolVO, _storagePoolDao.findById(storagePoolId), liveMigrateVolume)) {
             throw new InvalidParameterValueException("Migration of encrypted volumes is unsupported");
         }
 
@@ -3687,6 +3691,19 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
     private boolean isSourceAndDestOnStorPool(StoragePoolVO storagePoolVO, StoragePoolVO destinationStoragePoolVo) {
         return storagePoolVO.getPoolType() == Storage.StoragePoolType.StorPool
                 && destinationStoragePoolVo.getPoolType() == Storage.StoragePoolType.StorPool;
+    }
+
+    /**
+     * An encrypted volume can only be moved between pools by a flattening qemu-img convert that re-encrypts into the destination
+     * image. The KVM storage adaptor can do that for the file-based pool types, and only while the volume is detached or its VM
+     * is stopped; no other hypervisor or transfer path carries the passphrase through to the destination.
+     */
+    protected boolean isOfflineKvmFileBasedEncryptedVolumeMigration(HypervisorType hypervisorType, StoragePoolVO srcStoragePoolVO,
+            StoragePoolVO destStoragePoolVO, boolean liveMigrateVolume) {
+        return HypervisorType.KVM.equals(hypervisorType)
+                && !liveMigrateVolume
+                && srcStoragePoolVO != null && ENCRYPTED_VOLUME_MIGRATION_POOL_TYPES.contains(srcStoragePoolVO.getPoolType())
+                && destStoragePoolVO != null && ENCRYPTED_VOLUME_MIGRATION_POOL_TYPES.contains(destStoragePoolVO.getPoolType());
     }
 
     /**

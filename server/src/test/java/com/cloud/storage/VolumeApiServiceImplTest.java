@@ -1699,6 +1699,108 @@ public class VolumeApiServiceImplTest {
         }
     }
 
+    private static final String ENCRYPTED_MIGRATION_UNSUPPORTED = "Migration of encrypted volumes is unsupported";
+
+    /**
+     * Arranges a detached, ready volume on pool 1 being migrated to pool 2, with the given hypervisor and pool types.
+     * Stubbing stays lenient because each caller only reaches a different part of the validation chain.
+     */
+    private void prepareMigrateEncryptedVolume(HypervisorType hypervisorType, Long passphraseId,
+            Storage.StoragePoolType srcPoolType, Storage.StoragePoolType destPoolType) {
+        Mockito.lenient().when(migrateVolumeCmd.getVolumeId()).thenReturn(1L);
+        Mockito.lenient().when(migrateVolumeCmd.getStoragePoolId()).thenReturn(2L);
+
+        VolumeVO vol = Mockito.mock(VolumeVO.class);
+        Mockito.lenient().when(volumeDaoMock.findById(1L)).thenReturn(vol);
+        Mockito.lenient().when(volumeDaoMock.getHypervisorType(1L)).thenReturn(hypervisorType);
+        Mockito.lenient().when(vol.getState()).thenReturn(Volume.State.Ready);
+        Mockito.lenient().when(vol.getPoolId()).thenReturn(1L);
+        Mockito.lenient().when(vol.getInstanceId()).thenReturn(null);
+        Mockito.lenient().when(vol.getDiskOfferingId()).thenReturn(1L);
+        Mockito.lenient().when(vol.getPassphraseId()).thenReturn(passphraseId);
+
+        Mockito.lenient().when(_diskOfferingDao.findById(1L)).thenReturn(Mockito.mock(DiskOfferingVO.class));
+
+        StoragePoolVO srcStoragePoolVO = Mockito.mock(StoragePoolVO.class);
+        Mockito.lenient().when(srcStoragePoolVO.getPoolType()).thenReturn(srcPoolType);
+        Mockito.lenient().when(primaryDataStoreDaoMock.findById(1L)).thenReturn(srcStoragePoolVO);
+
+        StoragePoolVO destStoragePoolVO = Mockito.mock(StoragePoolVO.class);
+        Mockito.lenient().when(destStoragePoolVO.getPoolType()).thenReturn(destPoolType);
+        Mockito.lenient().when(primaryDataStoreDaoMock.findById(2L)).thenReturn(destStoragePoolVO);
+
+        Mockito.lenient().when(dataStoreMgr.getDataStore(2L, DataStoreRole.Primary)).thenReturn(Mockito.mock(PrimaryDataStore.class));
+        Mockito.lenient().doReturn(new Pair<>(true, "success")).when(storageMgr)
+                .checkIfReadyVolumeFitsInStoragePoolWithStorageAccessGroups(any(), any());
+    }
+
+    @Test
+    public void testEncryptedVolumeMigrationAllowedForOfflineKvmBetweenFileBasedPools() {
+        prepareMigrateEncryptedVolume(HypervisorType.KVM, 1L, Storage.StoragePoolType.NetworkFilesystem, Storage.StoragePoolType.Filesystem);
+
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class, () -> volumeApiServiceImpl.migrateVolume(migrateVolumeCmd));
+
+        // The encryption guard is passed; the run stops later, on the unstubbed storage pool compatibility check
+        Assert.assertFalse(e instanceof InvalidParameterValueException);
+        Assert.assertNotEquals(ENCRYPTED_MIGRATION_UNSUPPORTED, e.getMessage());
+    }
+
+    @Test
+    public void testEncryptedVolumeMigrationToRbdStillThrows() {
+        prepareMigrateEncryptedVolume(HypervisorType.KVM, 1L, Storage.StoragePoolType.NetworkFilesystem, Storage.StoragePoolType.RBD);
+
+        InvalidParameterValueException e = Assert.assertThrows(InvalidParameterValueException.class,
+                () -> volumeApiServiceImpl.migrateVolume(migrateVolumeCmd));
+        Assert.assertEquals(ENCRYPTED_MIGRATION_UNSUPPORTED, e.getMessage());
+    }
+
+    @Test
+    public void testEncryptedVolumeMigrationOnVmwareStillThrows() {
+        prepareMigrateEncryptedVolume(HypervisorType.VMware, 1L, Storage.StoragePoolType.NetworkFilesystem, Storage.StoragePoolType.NetworkFilesystem);
+
+        InvalidParameterValueException e = Assert.assertThrows(InvalidParameterValueException.class,
+                () -> volumeApiServiceImpl.migrateVolume(migrateVolumeCmd));
+        Assert.assertEquals(ENCRYPTED_MIGRATION_UNSUPPORTED, e.getMessage());
+    }
+
+    @Test
+    public void testUnencryptedVolumeMigrationUnaffectedByEncryptionGuard() {
+        prepareMigrateEncryptedVolume(HypervisorType.KVM, null, Storage.StoragePoolType.NetworkFilesystem, Storage.StoragePoolType.RBD);
+
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class, () -> volumeApiServiceImpl.migrateVolume(migrateVolumeCmd));
+
+        Assert.assertFalse(e instanceof InvalidParameterValueException);
+        Assert.assertNotEquals(ENCRYPTED_MIGRATION_UNSUPPORTED, e.getMessage());
+    }
+
+    private StoragePoolVO poolOfType(Storage.StoragePoolType type) {
+        StoragePoolVO pool = Mockito.mock(StoragePoolVO.class);
+        Mockito.lenient().when(pool.getPoolType()).thenReturn(type);
+        return pool;
+    }
+
+    @Test
+    public void testIsOfflineKvmFileBasedEncryptedVolumeMigration() {
+        StoragePoolVO nfs = poolOfType(Storage.StoragePoolType.NetworkFilesystem);
+        StoragePoolVO filesystem = poolOfType(Storage.StoragePoolType.Filesystem);
+        StoragePoolVO sharedMountPoint = poolOfType(Storage.StoragePoolType.SharedMountPoint);
+        StoragePoolVO rbd = poolOfType(Storage.StoragePoolType.RBD);
+
+        Assert.assertTrue(volumeApiServiceImpl.isOfflineKvmFileBasedEncryptedVolumeMigration(HypervisorType.KVM, nfs, filesystem, false));
+        Assert.assertTrue(volumeApiServiceImpl.isOfflineKvmFileBasedEncryptedVolumeMigration(HypervisorType.KVM, sharedMountPoint, nfs, false));
+
+        Assert.assertFalse("live migration must stay blocked",
+                volumeApiServiceImpl.isOfflineKvmFileBasedEncryptedVolumeMigration(HypervisorType.KVM, nfs, filesystem, true));
+        Assert.assertFalse("RBD destination has no encryption story",
+                volumeApiServiceImpl.isOfflineKvmFileBasedEncryptedVolumeMigration(HypervisorType.KVM, nfs, rbd, false));
+        Assert.assertFalse("RBD source has no encryption story",
+                volumeApiServiceImpl.isOfflineKvmFileBasedEncryptedVolumeMigration(HypervisorType.KVM, rbd, nfs, false));
+        Assert.assertFalse("only KVM carries the passphrase to the destination",
+                volumeApiServiceImpl.isOfflineKvmFileBasedEncryptedVolumeMigration(HypervisorType.VMware, nfs, filesystem, false));
+        Assert.assertFalse(volumeApiServiceImpl.isOfflineKvmFileBasedEncryptedVolumeMigration(HypervisorType.KVM, nfs, null, false));
+        Assert.assertFalse(volumeApiServiceImpl.isOfflineKvmFileBasedEncryptedVolumeMigration(HypervisorType.KVM, null, filesystem, false));
+    }
+
     @Test
     public void testValidationsForCheckVolumeAPI() {
         VolumeVO volume = mock(VolumeVO.class);
