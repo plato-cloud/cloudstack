@@ -95,7 +95,7 @@ public class DataMotionServiceImpl implements DataMotionService {
      * @param srcData
      * @param destData
      */
-    private void cleanUpVolumesForFailedMigrations(DataObject srcData, DataObject destData) {
+    protected void cleanUpVolumesForFailedMigrations(DataObject srcData, DataObject destData) {
         VolumeVO destinationVO = volDao.findById(destData.getId());
         VolumeVO sourceVO = volDao.findById(srcData.getId());
         sourceVO.setState(Volume.State.Ready);
@@ -107,7 +107,13 @@ public class DataMotionServiceImpl implements DataMotionService {
         volDao.update(destinationVO.getId(), destinationVO);
 
         if (passphraseId != null) {
-            passphraseDao.remove(passphraseId);
+            List<VolumeVO> volumes = volDao.listVolumesByPassphraseId(passphraseId);
+            if (volumes != null && !volumes.isEmpty()) {
+                logger.debug("Passphrase {} is still referenced by {} other volume(s), skipping deletion", passphraseId, volumes.size());
+            } else {
+                logger.debug("Deleting passphrase {}", passphraseId);
+                passphraseDao.remove(passphraseId);
+            }
         }
 
     }
