@@ -49,8 +49,10 @@ public class HAProxyConfigurator implements LoadBalancerConfigurator {
     private static String[] globalSection = {"global", "\tlog 127.0.0.1:3914   local0 warning", "\tmaxconn 4096", "\tmaxpipes 1024", "\tchroot /var/lib/haproxy",
         "\tuser haproxy", "\tgroup haproxy", "\tstats socket /run/haproxy/admin.sock", "\tdaemon"};
 
+    // client-fin/server-fin bound half-closed sessions only; timeout client would cut long-lived idle connections.
     private static String[] defaultsSection = {"defaults", "\tlog     global", "\tmode    tcp", "\toption  dontlognull", "\tretries 3", "\toption redispatch",
-        "\toption forwardfor", "\toption httpclose", "\ttimeout connect    5000", "\ttimeout client     50000", "\ttimeout server     50000"};
+        "\toption forwardfor", "\toption httpclose", "\ttimeout connect    5000", "\ttimeout client     50000", "\ttimeout server     50000",
+        "\ttimeout client-fin 30s", "\ttimeout server-fin 30s"};
 
     private static String[] defaultListen = {"listen  vmops", "\tbind 0.0.0.0:9", "\toption transparent"};
 
