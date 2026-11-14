@@ -43,6 +43,7 @@ import org.apache.cloudstack.utils.qemu.QemuImgFile;
 import org.apache.cloudstack.utils.qemu.QemuObject;
 import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -97,6 +98,9 @@ public class LibvirtStorageAdaptor implements StorageAdaptor {
     private int rbdOrder = 0; /* Order 0 means 4MB blocks (the default) */
 
     private static final Set<StoragePoolType> QEMU_IMG_MANAGED_POOL_TYPES = Set.of(StoragePoolType.NetworkFilesystem, StoragePoolType.Filesystem, StoragePoolType.SharedMountPoint);
+
+    protected static final String SOURCE_SECRET_NAME = "sec0";
+    protected static final String DEST_SECRET_NAME = "sec1";
 
     public LibvirtStorageAdaptor(StorageLayer storage) {
         _storageLayer = storage;
@@ -1656,13 +1660,24 @@ public class LibvirtStorageAdaptor implements StorageAdaptor {
                 disk.getFormat() : PhysicalDiskFormat.RAW;
         String sourcePath = disk.getPath();
 
+        if (ArrayUtils.isNotEmpty(srcPassphrase) || ArrayUtils.isNotEmpty(dstPassphrase)) {
+            if (srcPool.getType() == StoragePoolType.RBD || destPool.getType() == StoragePoolType.RBD) {
+                throw new CloudRuntimeException(String.format("Copying an encrypted volume between %s and %s is not supported, as qemu-img cannot carry the"
+                        + " encryption secret through an RBD endpoint here", srcPool.getType(), destPool.getType()));
+            }
+            if (sourceFormat == PhysicalDiskFormat.TAR || sourceFormat == PhysicalDiskFormat.DIR) {
+                throw new CloudRuntimeException(String.format("Copying an encrypted volume from a %s source is not supported, as it is extracted rather than"
+                        + " converted", sourceFormat));
+            }
+        }
+
         KVMPhysicalDisk newDisk;
         logger.debug("copyPhysicalDisk: disk size:{}, virtualsize:{} format:{}", toHumanReadableSize(disk.getSize()), toHumanReadableSize(disk.getVirtualSize()), disk.getFormat());
         if (destPool.getType() != StoragePoolType.RBD) {
             if (disk.getFormat() == PhysicalDiskFormat.TAR) {
                 newDisk = destPool.createPhysicalDisk(name, PhysicalDiskFormat.DIR, Storage.ProvisioningType.THIN, disk.getVirtualSize(), null);
             } else {
-                newDisk = destPool.createPhysicalDisk(name, Storage.ProvisioningType.THIN, disk.getVirtualSize(), null);
+                newDisk = destPool.createPhysicalDisk(name, Storage.ProvisioningType.THIN, disk.getVirtualSize(), dstPassphrase);
             }
         } else {
             newDisk = new KVMPhysicalDisk(destPool.getSourceDir() + "/" + name, name, destPool);
@@ -1695,21 +1710,34 @@ public class LibvirtStorageAdaptor implements StorageAdaptor {
                 Script.runSimpleBashScript("cp -p -r " + sourcePath + "/* " + destPath, timeout);
             } else {
                 srcFile = new QemuImgFile(sourcePath, sourceFormat);
-                try {
+                try (KeyFile srcKey = new KeyFile(srcPassphrase); KeyFile dstKey = new KeyFile(dstPassphrase)) {
                     Map<String, String> info = qemu.info(srcFile);
                     String backingFile = info.get(QemuImg.BACKING_FILE);
                     // qcow2 templates can just be copied into place
-                    if (sourceFormat.equals(destFormat) && backingFile == null && sourcePath.endsWith(".qcow2")) {
+                    if (!srcKey.isSet() && !dstKey.isSet() && sourceFormat.equals(destFormat) && backingFile == null && sourcePath.endsWith(".qcow2")) {
                         String result = Script.runSimpleBashScript("cp -f " + sourcePath + " " + destPath, timeout);
                         if (result != null) {
                             throw new CloudRuntimeException("Failed to create disk: " + result);
                         }
                     } else {
                         destFile = new QemuImgFile(destPath, destFormat);
+                        Map<String, String> options = new HashMap<>();
+                        List<QemuObject> qemuObjects = new ArrayList<>();
+                        QemuImageOptions srcImageOptions = new QemuImageOptions(sourceFormat, sourcePath, null);
+
+                        if (srcKey.isSet()) {
+                            qemuObjects.add(QemuObject.prepareSecretForQemuImg(sourceFormat, disk.getQemuEncryptFormat(), srcKey.toString(), SOURCE_SECRET_NAME, null));
+                            srcImageOptions = new QemuImageOptions(sourceFormat, sourcePath, SOURCE_SECRET_NAME);
+                        }
+
+                        if (dstKey.isSet()) {
+                            qemuObjects.add(QemuObject.prepareSecretForQemuImg(destFormat, QemuObject.EncryptFormat.LUKS, dstKey.toString(), DEST_SECRET_NAME, options));
+                            newDisk.setQemuEncryptFormat(QemuObject.EncryptFormat.LUKS);
+                        }
+
                         try {
-                            boolean isQCOW2 = PhysicalDiskFormat.QCOW2.equals(sourceFormat);
-                            qemu.convert(srcFile, destFile, null, null, new QemuImageOptions(srcFile.getFormat(), srcFile.getFileName(), null),
-                                    null, false, isQCOW2);
+                            boolean keepBitmaps = PhysicalDiskFormat.QCOW2.equals(sourceFormat) && !srcKey.isSet();
+                            qemu.convert(srcFile, destFile, options, qemuObjects, srcImageOptions, null, false, keepBitmaps);
                             Map<String, String> destInfo = qemu.info(destFile);
                             Long virtualSize = Long.parseLong(destInfo.get(QemuImg.VIRTUAL_SIZE));
                             newDisk.setVirtualSize(virtualSize);
@@ -1722,6 +1750,8 @@ public class LibvirtStorageAdaptor implements StorageAdaptor {
                 } catch (QemuImgException e) {
                     logger.error("Failed to fetch the information of file " + srcFile.getFileName() + " the error was: " + e.getMessage());
                     newDisk = null;
+                } catch (IOException e) {
+                    throw new CloudRuntimeException(String.format("Failed to prepare the encryption key files needed to copy %s to %s", sourcePath, name), e);
                 }
             }
         } else if ((srcPool.getType() != StoragePoolType.RBD) && (destPool.getType() == StoragePoolType.RBD)) {
