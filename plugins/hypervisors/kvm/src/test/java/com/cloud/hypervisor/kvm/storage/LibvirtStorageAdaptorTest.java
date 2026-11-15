@@ -314,6 +314,63 @@ public class LibvirtStorageAdaptorTest {
         Assert.assertFalse(Files.exists(Paths.get(keyFilePath(qemuObjects, "sec1"))));
     }
 
+    /** The management server sends an empty passphrase, not a null one, for a volume that has no passphrase at all. */
+    private static final byte[] NO_PASSPHRASE = new byte[0];
+
+    @Test
+    public void testCopyPhysicalDiskEncryptsAPlaintextSource() throws Exception {
+        KVMPhysicalDisk disk = sourceDisk(Storage.StoragePoolType.NetworkFilesystem, PhysicalDiskFormat.QCOW2);
+        KVMStoragePool destPool = destinationPool(Storage.StoragePoolType.NetworkFilesystem);
+
+        KVMPhysicalDisk result;
+        try (MockedConstruction<QemuImg> ignored = mockQemuImg(qemuInfo("/mnt/src-pool/template.qcow2"), null)) {
+            result = libvirtStorageAdaptor.copyPhysicalDisk(disk, DEST_NAME, destPool, 0, NO_PASSPHRASE, DST_PASSPHRASE,
+                    Storage.ProvisioningType.THIN);
+        }
+
+        Mockito.verify(destPool).createPhysicalDisk(DEST_NAME, Storage.ProvisioningType.THIN, VIRTUAL_SIZE, DST_PASSPHRASE);
+
+        Assert.assertEquals(1, convertCalls.size());
+        List<QemuObject> qemuObjects = capturedQemuObjects();
+        Assert.assertEquals(1, qemuObjects.size());
+        Assert.assertNull("a plaintext source has no secret to read it with", secretFlag(qemuObjects, "sec0"));
+        Assert.assertNotNull(secretFlag(qemuObjects, "sec1"));
+
+        Assert.assertEquals("luks", capturedOptions().get("encrypt.format"));
+        Assert.assertEquals("sec1", capturedOptions().get("encrypt.key-secret"));
+        Assert.assertFalse(capturedSourceImageOptions().contains("encrypt.key-secret"));
+
+        Assert.assertEquals(QemuObject.EncryptFormat.LUKS, result.getQemuEncryptFormat());
+        Assert.assertFalse(Files.exists(Paths.get(keyFilePath(qemuObjects, "sec1"))));
+    }
+
+    @Test
+    public void testCopyPhysicalDiskDecryptsAnEncryptedSource() throws Exception {
+        KVMPhysicalDisk disk = sourceDisk(Storage.StoragePoolType.NetworkFilesystem, PhysicalDiskFormat.QCOW2);
+        disk.setQemuEncryptFormat(QemuObject.EncryptFormat.LUKS);
+        KVMStoragePool destPool = destinationPool(Storage.StoragePoolType.NetworkFilesystem);
+
+        KVMPhysicalDisk result;
+        try (MockedConstruction<QemuImg> ignored = mockQemuImg(qemuInfo("/mnt/src-pool/template.qcow2"), null)) {
+            result = libvirtStorageAdaptor.copyPhysicalDisk(disk, DEST_NAME, destPool, 0, SRC_PASSPHRASE, NO_PASSPHRASE,
+                    Storage.ProvisioningType.THIN);
+        }
+
+        Mockito.verify(destPool).createPhysicalDisk(DEST_NAME, Storage.ProvisioningType.THIN, VIRTUAL_SIZE, NO_PASSPHRASE);
+
+        Assert.assertEquals(1, convertCalls.size());
+        List<QemuObject> qemuObjects = capturedQemuObjects();
+        Assert.assertEquals(1, qemuObjects.size());
+        Assert.assertNotNull(secretFlag(qemuObjects, "sec0"));
+        Assert.assertNull("nothing may claim the destination is encrypted", secretFlag(qemuObjects, "sec1"));
+
+        Assert.assertTrue("the destination must not be given an encryption format", capturedOptions().isEmpty());
+        Assert.assertTrue(capturedSourceImageOptions().contains("encrypt.key-secret=sec0"));
+
+        Assert.assertNull(result.getQemuEncryptFormat());
+        Assert.assertFalse(Files.exists(Paths.get(keyFilePath(qemuObjects, "sec0"))));
+    }
+
     @Test
     public void testCopyPhysicalDiskWithoutPassphrasesIsUnchanged() throws Exception {
         KVMPhysicalDisk disk = sourceDisk(Storage.StoragePoolType.NetworkFilesystem, PhysicalDiskFormat.QCOW2);
