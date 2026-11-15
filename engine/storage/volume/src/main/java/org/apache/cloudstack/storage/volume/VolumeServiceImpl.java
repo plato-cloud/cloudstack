@@ -64,6 +64,7 @@ import org.apache.cloudstack.framework.async.AsyncCallbackDispatcher;
 import org.apache.cloudstack.framework.async.AsyncCompletionCallback;
 import org.apache.cloudstack.framework.async.AsyncRpcContext;
 import org.apache.cloudstack.framework.config.dao.ConfigurationDao;
+import org.apache.cloudstack.secret.PassphraseVO;
 import org.apache.cloudstack.secret.dao.PassphraseDao;
 import org.apache.cloudstack.storage.RemoteHostEndPoint;
 import org.apache.cloudstack.storage.command.CommandResult;
@@ -159,6 +160,10 @@ import com.cloud.vm.VirtualMachine;
 @Component
 public class VolumeServiceImpl implements VolumeService {
     protected Logger logger = LogManager.getLogger(getClass());
+
+    // Mirrors the name qemu gives the format, which is what the KVM agent reports back for a volume it encrypts
+    protected static final String LUKS_ENCRYPT_FORMAT = "luks";
+
     @Inject
     protected AgentManager agentMgr;
     @Inject
@@ -218,7 +223,7 @@ public class VolumeServiceImpl implements VolumeService {
     @Inject
     private SnapshotApiService snapshotApiService;
     @Inject
-    private PassphraseDao passphraseDao;
+    protected PassphraseDao passphraseDao;
     @Inject
     protected DiskOfferingDao diskOfferingDao;
 
@@ -1734,7 +1739,13 @@ public class VolumeServiceImpl implements VolumeService {
         return null;
     }
 
-    protected VolumeVO duplicateVolumeOnAnotherStorage(Volume volume, StoragePool pool) {
+    /**
+     * @param encryptDestination whether the copy is to be encrypted, or {@code null} to carry over whatever the source
+     *                           volume has. Turning encryption on means a key of its own for the copy, because the
+     *                           source keeps its plaintext bytes until the migration succeeds; turning it off means no
+     *                           key at all, so that nothing claims the copy is encrypted once it is not.
+     */
+    protected VolumeVO duplicateVolumeOnAnotherStorage(Volume volume, StoragePool pool, Boolean encryptDestination) {
         Long lastPoolId = volume.getPoolId();
         String folder = pool.getPath();
         // For SMB, pool credentials are also stored in the uri query string.  We trim the query string
@@ -1755,12 +1766,47 @@ public class VolumeServiceImpl implements VolumeService {
         newVol.setPoolType(pool.getPoolType());
         newVol.setLastPoolId(lastPoolId);
         newVol.setPodId(pool.getPodId());
-        if (volume.getPassphraseId() != null) {
+        if (volume.getPassphraseId() != null && !Boolean.FALSE.equals(encryptDestination)) {
             newVol.setPassphraseId(volume.getPassphraseId());
             newVol.setEncryptFormat(volume.getEncryptFormat());
+        } else if (volume.getPassphraseId() == null && Boolean.TRUE.equals(encryptDestination)) {
+            newVol.setPassphraseId(passphraseDao.persist(new PassphraseVO(true)).getId());
+            newVol.setEncryptFormat(LUKS_ENCRYPT_FORMAT);
         }
         newVol.setLastId(volume.getId());
         return volDao.persist(newVol);
+    }
+
+    /**
+     * The storage layer can only re-encrypt while it converts an image between two pools, so anything that copies by
+     * other means has to refuse rather than quietly hand back a copy in the state the caller did not ask for.
+     */
+    private void rejectEncryptionChange(Boolean encryptDestination, String copyMethod) {
+        if (encryptDestination != null) {
+            throw new CloudRuntimeException(String.format("Changing volume encryption is not possible through %s", copyMethod));
+        }
+    }
+
+    /**
+     * A key minted for the copy has nothing to decrypt once the copy never happened, and the leftover destination row
+     * must not keep claiming to be encrypted either.
+     */
+    protected void discardUnusedDestinationPassphrase(VolumeInfo srcVolume, VolumeVO destVolume) {
+        if (destVolume == null || destVolume.getPassphraseId() == null
+                || destVolume.getPassphraseId().equals(srcVolume.getPassphraseId())) {
+            return;
+        }
+
+        Long passphraseId = destVolume.getPassphraseId();
+        destVolume.setPassphraseId(null);
+        destVolume.setEncryptFormat(null);
+        volDao.update(destVolume.getId(), destVolume);
+
+        List<VolumeVO> volumes = volDao.listVolumesByPassphraseId(passphraseId);
+        if (volumes == null || volumes.isEmpty()) {
+            logger.debug("Deleting passphrase {} allocated for the abandoned copy of volume {}", passphraseId, srcVolume);
+            passphraseDao.remove(passphraseId);
+        }
     }
 
     private class CopyVolumeContext<T> extends AsyncRpcContext<T> {
@@ -1883,6 +1929,11 @@ public class VolumeServiceImpl implements VolumeService {
 
     @Override
     public AsyncCallFuture<VolumeApiResult> copyVolume(VolumeInfo srcVolume, DataStore destStore) {
+        return copyVolume(srcVolume, destStore, null);
+    }
+
+    @Override
+    public AsyncCallFuture<VolumeApiResult> copyVolume(VolumeInfo srcVolume, DataStore destStore, Boolean encryptDestination) {
         DataStore srcStore = srcVolume.getDataStore();
         if (logger.isDebugEnabled()) {
             String srcRole = (srcStore != null && srcStore.getRole() != null ? srcVolume.getDataStore().getRole().toString() : "<unknown role>");
@@ -1893,15 +1944,18 @@ public class VolumeServiceImpl implements VolumeService {
         }
 
         if (srcVolume.getState() == Volume.State.Uploaded) {
+            rejectEncryptionChange(encryptDestination, "a volume uploaded to secondary storage");
             return copyVolumeFromImageToPrimary(srcVolume, destStore);
         }
 
         if (destStore.getRole() == DataStoreRole.Image) {
+            rejectEncryptionChange(encryptDestination, "a copy to secondary storage");
             return copyVolumeFromPrimaryToImage(srcVolume, destStore);
         }
 
         if (srcStore.getRole() == DataStoreRole.Primary && destStore.getRole() == DataStoreRole.Primary && ((PrimaryDataStore) destStore).isManaged() &&
                 requiresNewManagedVolumeInDestStore((PrimaryDataStore) srcStore, (PrimaryDataStore) destStore)) {
+            rejectEncryptionChange(encryptDestination, "a copy into managed storage");
             return copyManagedVolume(srcVolume, destStore);
         }
 
@@ -1909,6 +1963,7 @@ public class VolumeServiceImpl implements VolumeService {
 
         AsyncCallFuture<VolumeApiResult> future = new AsyncCallFuture<>();
         VolumeApiResult res = new VolumeApiResult(srcVolume);
+        VolumeVO destVol = null;
         try {
             if (!snapshotMgr.canOperateOnVolume(srcVolume)) {
                 logger.debug("There are snapshots creating on this volume, can not move this volume");
@@ -1918,7 +1973,7 @@ public class VolumeServiceImpl implements VolumeService {
                 return future;
             }
 
-            VolumeVO destVol = duplicateVolumeOnAnotherStorage(srcVolume, (StoragePool)destStore);
+            destVol = duplicateVolumeOnAnotherStorage(srcVolume, (StoragePool)destStore, encryptDestination);
             VolumeInfo destVolume = volFactory.getVolume(destVol.getId(), destStore);
             destVolume.processEvent(Event.MigrationCopyRequested);
             srcVolume.processEvent(Event.MigrationRequested);
@@ -1932,6 +1987,7 @@ public class VolumeServiceImpl implements VolumeService {
             if(logger.isDebugEnabled()) {
                 logger.debug("Failed to copy volume.", e);
             }
+            discardUnusedDestinationPassphrase(srcVolume, destVol);
             res.setResult(e.toString());
             future.complete(res);
         }
@@ -2087,7 +2143,7 @@ public class VolumeServiceImpl implements VolumeService {
                 return future;
             }
 
-            VolumeVO destVol = duplicateVolumeOnAnotherStorage(srcVolume, (StoragePool)destStore);
+            VolumeVO destVol = duplicateVolumeOnAnotherStorage(srcVolume, (StoragePool)destStore, null);
             VolumeInfo destVolume = volFactory.getVolume(destVol.getId(), destStore);
 
             // Create a volume on managed storage.

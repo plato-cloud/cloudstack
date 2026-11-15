@@ -31,6 +31,7 @@ import com.cloud.storage.DiskOfferingVO;
 import com.cloud.storage.Storage;
 import com.cloud.storage.StorageManager;
 import com.cloud.storage.StoragePool;
+import com.cloud.storage.Volume;
 import com.cloud.storage.VolumeVO;
 import com.cloud.storage.dao.DiskOfferingDao;
 import com.cloud.storage.dao.VolumeDao;
@@ -39,6 +40,7 @@ import com.cloud.utils.Pair;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 
@@ -47,6 +49,8 @@ import org.apache.cloudstack.engine.subsystem.api.storage.VolumeDataFactory;
 import org.apache.cloudstack.engine.subsystem.api.storage.VolumeInfo;
 import org.apache.cloudstack.engine.subsystem.api.storage.VolumeService;
 import org.apache.cloudstack.framework.async.AsyncCallFuture;
+import org.apache.cloudstack.secret.PassphraseVO;
+import org.apache.cloudstack.secret.dao.PassphraseDao;
 import org.apache.cloudstack.storage.datastore.db.PrimaryDataStoreDao;
 import org.junit.Assert;
 import org.junit.Before;
@@ -101,6 +105,9 @@ public class VolumeServiceTest extends TestCase{
     @Mock
     DiskOfferingDao diskOfferingDaoMock;
 
+    @Mock
+    PassphraseDao passphraseDaoMock;
+
     @Before
     public void setup(){
         volumeServiceImplSpy = Mockito.spy(new VolumeServiceImpl());
@@ -111,6 +118,7 @@ public class VolumeServiceTest extends TestCase{
         volumeServiceImplSpy._hostDao = hostDaoMock;
         volumeServiceImplSpy.storagePoolDao = primaryDataStoreDao;
         volumeServiceImplSpy.diskOfferingDao = diskOfferingDaoMock;
+        volumeServiceImplSpy.passphraseDao = passphraseDaoMock;
     }
 
     @Test(expected = InterruptedException.class)
@@ -358,5 +366,84 @@ public class VolumeServiceTest extends TestCase{
         Mockito.when(diskOffering.getEncrypt()).thenReturn(encryption);
         Mockito.when(diskOfferingDaoMock.findByIdIncludingRemoved(diskOfferingId)).thenReturn(diskOffering);
         Mockito.when(diskOfferingDaoMock.findById(diskOfferingId)).thenReturn(diskOffering);
+    }
+
+    private VolumeVO sourceVolume(Long passphraseId, String encryptFormat) {
+        VolumeVO volume = new VolumeVO(Volume.Type.DATADISK, "source", 1L, 1L, 1L, 1L, Storage.ProvisioningType.THIN, 1024L, null, null, null);
+        volume.setPoolId(1L);
+        volume.setPassphraseId(passphraseId);
+        volume.setEncryptFormat(encryptFormat);
+        return volume;
+    }
+
+    private VolumeVO duplicateOnPool(VolumeVO source, Boolean encryptDestination) {
+        StoragePool pool = Mockito.mock(StoragePool.class);
+        Mockito.when(pool.getPoolType()).thenReturn(Storage.StoragePoolType.NetworkFilesystem);
+        Mockito.when(pool.getId()).thenReturn(2L);
+        Mockito.doAnswer(invocation -> invocation.getArgument(0)).when(volumeDaoMock).persist(Mockito.any(VolumeVO.class));
+
+        return volumeServiceImplSpy.duplicateVolumeOnAnotherStorage(source, pool, encryptDestination);
+    }
+
+    @Test
+    public void duplicateVolumeOnAnotherStorageGivesAnEncryptedCopyItsOwnPassphrase() {
+        PassphraseVO passphrase = Mockito.mock(PassphraseVO.class);
+        Mockito.when(passphrase.getId()).thenReturn(7L);
+        Mockito.when(passphraseDaoMock.persist(Mockito.any(PassphraseVO.class))).thenReturn(passphrase);
+
+        VolumeVO destination = duplicateOnPool(sourceVolume(null, null), Boolean.TRUE);
+
+        Assert.assertEquals(Long.valueOf(7L), destination.getPassphraseId());
+        Assert.assertEquals(VolumeServiceImpl.LUKS_ENCRYPT_FORMAT, destination.getEncryptFormat());
+    }
+
+    @Test
+    public void duplicateVolumeOnAnotherStorageLeavesADecryptedCopyWithoutAPassphrase() {
+        VolumeVO destination = duplicateOnPool(sourceVolume(5L, "luks"), Boolean.FALSE);
+
+        Assert.assertNull(destination.getPassphraseId());
+        Assert.assertNull(destination.getEncryptFormat());
+        Mockito.verifyNoInteractions(passphraseDaoMock);
+    }
+
+    @Test
+    public void duplicateVolumeOnAnotherStorageSharesThePassphraseWhenEncryptionIsUnchanged() {
+        VolumeVO destination = duplicateOnPool(sourceVolume(5L, "luks"), null);
+
+        Assert.assertEquals(Long.valueOf(5L), destination.getPassphraseId());
+        Assert.assertEquals("luks", destination.getEncryptFormat());
+        Mockito.verifyNoInteractions(passphraseDaoMock);
+    }
+
+    @Test
+    public void discardUnusedDestinationPassphraseRemovesAPassphraseMintedForTheCopy() {
+        VolumeVO destination = sourceVolume(7L, "luks");
+        Mockito.when(volumeInfoMock.getPassphraseId()).thenReturn(null);
+        Mockito.when(volumeDaoMock.listVolumesByPassphraseId(7L)).thenReturn(Collections.emptyList());
+
+        volumeServiceImplSpy.discardUnusedDestinationPassphrase(volumeInfoMock, destination);
+
+        Assert.assertNull(destination.getPassphraseId());
+        Assert.assertNull(destination.getEncryptFormat());
+        Mockito.verify(passphraseDaoMock).remove(7L);
+    }
+
+    @Test
+    public void discardUnusedDestinationPassphraseKeepsThePassphraseSharedWithTheSource() {
+        VolumeVO destination = sourceVolume(5L, "luks");
+        Mockito.when(volumeInfoMock.getPassphraseId()).thenReturn(5L);
+
+        volumeServiceImplSpy.discardUnusedDestinationPassphrase(volumeInfoMock, destination);
+
+        Assert.assertEquals(Long.valueOf(5L), destination.getPassphraseId());
+        Mockito.verifyNoInteractions(passphraseDaoMock);
+    }
+
+    @Test
+    public void discardUnusedDestinationPassphraseDoesNothingWithoutADestination() {
+        volumeServiceImplSpy.discardUnusedDestinationPassphrase(volumeInfoMock, null);
+
+        Mockito.verifyNoInteractions(passphraseDaoMock);
+        Mockito.verify(volumeDaoMock, Mockito.never()).update(Mockito.anyLong(), Mockito.any(VolumeVO.class));
     }
 }
