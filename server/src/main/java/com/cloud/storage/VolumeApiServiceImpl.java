@@ -3619,6 +3619,7 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
             newDiskOffering = diskOffering;
         }
         validateConditionsToReplaceDiskOfferingOfVolume(vol, newDiskOffering, destPool);
+        validateEncryptionChangeForVolumeMigration(vol, newDiskOffering, hypervisorType, srcStoragePoolVO, destPool, liveMigrateVolume);
 
         if (vm != null) {
             // serialize VM operation
@@ -3704,6 +3705,59 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
                 && !liveMigrateVolume
                 && srcStoragePoolVO != null && ENCRYPTED_VOLUME_MIGRATION_POOL_TYPES.contains(srcStoragePoolVO.getPoolType())
                 && destStoragePoolVO != null && ENCRYPTED_VOLUME_MIGRATION_POOL_TYPES.contains(destStoragePoolVO.getPoolType());
+    }
+
+    /**
+     * Whether the new disk offering asks the volume to end up in a different encryption state than it is in now.
+     *
+     * The volume's passphrase is what decides its current state, not the encryption flag of the offering it carries:
+     * the two can disagree, and only the passphrase says anything about the bytes on disk.
+     *
+     * @return {@code TRUE} to encrypt, {@code FALSE} to decrypt, or {@code null} when nothing about the encryption changes
+     */
+    protected Boolean getRequestedEncryptionChange(Volume volume, DiskOffering newDiskOffering) {
+        if (newDiskOffering == null || newDiskOffering.getId() == volume.getDiskOfferingId()) {
+            return null;
+        }
+        boolean encrypted = volume.getPassphraseId() != null;
+        return newDiskOffering.getEncrypt() == encrypted ? null : newDiskOffering.getEncrypt();
+    }
+
+    /**
+     * Changing the encryption of a volume means rewriting every byte of it, which only the re-encrypting qemu-img
+     * convert in the KVM storage adaptor does, and only offline between the file-based pool types. Everywhere else the
+     * migration would move the volume unchanged and the new offering would be the only thing that said it was
+     * encrypted, so refuse instead.
+     */
+    protected void validateEncryptionChangeForVolumeMigration(Volume volume, DiskOffering newDiskOffering, HypervisorType hypervisorType,
+            StoragePool srcStoragePool, StoragePool destStoragePool, boolean liveMigrateVolume) {
+        Boolean encryptDestination = getRequestedEncryptionChange(volume, newDiskOffering);
+        if (encryptDestination == null) {
+            return;
+        }
+
+        String change = String.format("%s volume %s while migrating it", encryptDestination ? "encrypting" : "decrypting", volume.getUuid());
+
+        // The hypervisor is checked first because a stopped VMware instance also takes the live migration path below,
+        // and being told to stop an instance that is already stopped would send the operator nowhere.
+        if (!HypervisorType.KVM.equals(hypervisorType)) {
+            throw new InvalidParameterValueException(String.format("Cannot change the disk offering to [%s]: %s is only supported on KVM,"
+                    + " and this volume is on %s.", newDiskOffering.getUuid(), change, hypervisorType));
+        }
+
+        if (liveMigrateVolume) {
+            throw new InvalidParameterValueException(String.format("Cannot change the disk offering to [%s]: %s requires rewriting the whole"
+                    + " image, which cannot be done underneath a running instance. Stop the instance or detach the volume, then migrate it"
+                    + " without livemigrate.", newDiskOffering.getUuid(), change));
+        }
+
+        for (StoragePool pool : List.of(srcStoragePool, destStoragePool)) {
+            if (!ENCRYPTED_VOLUME_MIGRATION_POOL_TYPES.contains(pool.getPoolType())) {
+                throw new InvalidParameterValueException(String.format("Cannot change the disk offering to [%s]: %s is only supported between"
+                        + " the %s pool types, and pool [%s] is of type %s.", newDiskOffering.getUuid(), change,
+                        ENCRYPTED_VOLUME_MIGRATION_POOL_TYPES, pool.getUuid(), pool.getPoolType()));
+            }
+        }
     }
 
     /**
@@ -3887,7 +3941,7 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
             if (liveMigrateVolume) {
                 newVol = liveMigrateVolume(volume, destPool);
             } else {
-                newVol = _volumeMgr.migrateVolume(volume, destPool);
+                newVol = _volumeMgr.migrateVolume(volume, destPool, getRequestedEncryptionChange(volume, newDiskOffering));
             }
             if (newDiskOffering != null) {
                 _volsDao.updateDiskOffering(newVol.getId(), newDiskOffering.getId());
