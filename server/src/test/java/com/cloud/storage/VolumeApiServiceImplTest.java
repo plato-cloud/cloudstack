@@ -1801,6 +1801,128 @@ public class VolumeApiServiceImplTest {
         Assert.assertFalse(volumeApiServiceImpl.isOfflineKvmFileBasedEncryptedVolumeMigration(HypervisorType.KVM, null, filesystem, false));
     }
 
+    private VolumeVO encryptionStateVolume(Long passphraseId, long diskOfferingId) {
+        VolumeVO volume = Mockito.mock(VolumeVO.class);
+        Mockito.lenient().when(volume.getPassphraseId()).thenReturn(passphraseId);
+        Mockito.lenient().when(volume.getDiskOfferingId()).thenReturn(diskOfferingId);
+        Mockito.lenient().when(volume.getUuid()).thenReturn("volume-uuid");
+        return volume;
+    }
+
+    private DiskOfferingVO encryptionDiskOffering(long id, boolean encrypt) {
+        DiskOfferingVO offering = Mockito.mock(DiskOfferingVO.class);
+        Mockito.lenient().when(offering.getId()).thenReturn(id);
+        Mockito.lenient().when(offering.getEncrypt()).thenReturn(encrypt);
+        Mockito.lenient().when(offering.getUuid()).thenReturn("offering-uuid");
+        return offering;
+    }
+
+    @Test
+    public void testGetRequestedEncryptionChange() {
+        VolumeVO plaintext = encryptionStateVolume(null, 1L);
+        VolumeVO encrypted = encryptionStateVolume(5L, 1L);
+
+        Assert.assertEquals(Boolean.TRUE, volumeApiServiceImpl.getRequestedEncryptionChange(plaintext, encryptionDiskOffering(2L, true)));
+        Assert.assertEquals(Boolean.FALSE, volumeApiServiceImpl.getRequestedEncryptionChange(encrypted, encryptionDiskOffering(2L, false)));
+
+        Assert.assertNull("no new offering means nothing was asked for", volumeApiServiceImpl.getRequestedEncryptionChange(plaintext, null));
+        Assert.assertNull(volumeApiServiceImpl.getRequestedEncryptionChange(plaintext, encryptionDiskOffering(2L, false)));
+        Assert.assertNull(volumeApiServiceImpl.getRequestedEncryptionChange(encrypted, encryptionDiskOffering(2L, true)));
+        Assert.assertNull("the volume is keeping the offering it already has",
+                volumeApiServiceImpl.getRequestedEncryptionChange(plaintext, encryptionDiskOffering(1L, true)));
+    }
+
+    private StoragePool migrationPool(Storage.StoragePoolType type) {
+        StoragePool pool = Mockito.mock(StoragePool.class);
+        Mockito.lenient().when(pool.getPoolType()).thenReturn(type);
+        Mockito.lenient().when(pool.getUuid()).thenReturn("pool-uuid");
+        return pool;
+    }
+
+    private void validateEncryptionChange(VolumeVO volume, DiskOfferingVO newDiskOffering, HypervisorType hypervisorType,
+            Storage.StoragePoolType srcPoolType, Storage.StoragePoolType destPoolType, boolean liveMigrateVolume) {
+        volumeApiServiceImpl.validateEncryptionChangeForVolumeMigration(volume, newDiskOffering, hypervisorType,
+                migrationPool(srcPoolType), migrationPool(destPoolType), liveMigrateVolume);
+    }
+
+    @Test
+    public void testEncryptionChangeAllowedForOfflineKvmBetweenFileBasedPools() {
+        validateEncryptionChange(encryptionStateVolume(null, 1L), encryptionDiskOffering(2L, true), HypervisorType.KVM,
+                Storage.StoragePoolType.NetworkFilesystem, Storage.StoragePoolType.Filesystem, false);
+
+        validateEncryptionChange(encryptionStateVolume(5L, 1L), encryptionDiskOffering(2L, false), HypervisorType.KVM,
+                Storage.StoragePoolType.SharedMountPoint, Storage.StoragePoolType.NetworkFilesystem, false);
+    }
+
+    @Test
+    public void testEncryptionChangeRejectedForLiveMigration() {
+        InvalidParameterValueException e = Assert.assertThrows(InvalidParameterValueException.class,
+                () -> validateEncryptionChange(encryptionStateVolume(null, 1L), encryptionDiskOffering(2L, true), HypervisorType.KVM,
+                        Storage.StoragePoolType.NetworkFilesystem, Storage.StoragePoolType.NetworkFilesystem, true));
+
+        Assert.assertTrue(e.getMessage(), e.getMessage().contains("encrypting volume volume-uuid"));
+        Assert.assertTrue(e.getMessage(), e.getMessage().contains("running instance"));
+    }
+
+    @Test
+    public void testEncryptionChangeRejectedForNonKvmHypervisor() {
+        InvalidParameterValueException e = Assert.assertThrows(InvalidParameterValueException.class,
+                () -> validateEncryptionChange(encryptionStateVolume(null, 1L), encryptionDiskOffering(2L, true), HypervisorType.VMware,
+                        Storage.StoragePoolType.NetworkFilesystem, Storage.StoragePoolType.NetworkFilesystem, false));
+
+        Assert.assertTrue(e.getMessage(), e.getMessage().contains("only supported on KVM"));
+        Assert.assertTrue(e.getMessage(), e.getMessage().contains("VMware"));
+
+        // A stopped VMware instance is migrated through the live migration path, and must not be told to stop
+        InvalidParameterValueException stopped = Assert.assertThrows(InvalidParameterValueException.class,
+                () -> validateEncryptionChange(encryptionStateVolume(null, 1L), encryptionDiskOffering(2L, true), HypervisorType.VMware,
+                        Storage.StoragePoolType.VMFS, Storage.StoragePoolType.VMFS, true));
+        Assert.assertTrue(stopped.getMessage(), stopped.getMessage().contains("only supported on KVM"));
+    }
+
+    @Test
+    public void testEncryptionChangeRejectedForUnsupportedPoolType() {
+        InvalidParameterValueException destination = Assert.assertThrows(InvalidParameterValueException.class,
+                () -> validateEncryptionChange(encryptionStateVolume(null, 1L), encryptionDiskOffering(2L, true), HypervisorType.KVM,
+                        Storage.StoragePoolType.NetworkFilesystem, Storage.StoragePoolType.RBD, false));
+        Assert.assertTrue(destination.getMessage(), destination.getMessage().contains(Storage.StoragePoolType.RBD.toString()));
+
+        InvalidParameterValueException source = Assert.assertThrows(InvalidParameterValueException.class,
+                () -> validateEncryptionChange(encryptionStateVolume(5L, 1L), encryptionDiskOffering(2L, false), HypervisorType.KVM,
+                        Storage.StoragePoolType.PowerFlex, Storage.StoragePoolType.NetworkFilesystem, false));
+        Assert.assertTrue(source.getMessage(), source.getMessage().contains(Storage.StoragePoolType.PowerFlex.toString()));
+    }
+
+    @Test
+    public void testMigrationWithoutEncryptionChangeSkipsTheEncryptionRules() {
+        validateEncryptionChange(encryptionStateVolume(null, 1L), encryptionDiskOffering(2L, false), HypervisorType.VMware,
+                Storage.StoragePoolType.VMFS, Storage.StoragePoolType.VMFS, true);
+
+        validateEncryptionChange(encryptionStateVolume(null, 1L), null, HypervisorType.VMware,
+                Storage.StoragePoolType.VMFS, Storage.StoragePoolType.VMFS, true);
+    }
+
+    @Test
+    public void testApplyNewDiskOfferingBeforeMigrationMovesTheVolumeOntoTheNewOffering() {
+        VolumeVO volume = encryptionStateVolume(null, 1L);
+        Mockito.when(volume.getId()).thenReturn(11L);
+
+        Long previousDiskOfferingId = volumeApiServiceImpl.applyNewDiskOfferingBeforeMigration(volume, encryptionDiskOffering(2L, true));
+
+        Assert.assertEquals(Long.valueOf(1L), previousDiskOfferingId);
+        Mockito.verify(volumeDaoMock).updateDiskOffering(11L, 2L);
+    }
+
+    @Test
+    public void testApplyNewDiskOfferingBeforeMigrationLeavesAnUnchangedOfferingAlone() {
+        VolumeVO volume = encryptionStateVolume(null, 1L);
+
+        Assert.assertNull(volumeApiServiceImpl.applyNewDiskOfferingBeforeMigration(volume, null));
+        Assert.assertNull(volumeApiServiceImpl.applyNewDiskOfferingBeforeMigration(volume, encryptionDiskOffering(1L, true)));
+
+        Mockito.verify(volumeDaoMock, Mockito.never()).updateDiskOffering(Mockito.anyLong(), Mockito.anyLong());
+    }
+
     @Test
     public void testValidationsForCheckVolumeAPI() {
         VolumeVO volume = mock(VolumeVO.class);

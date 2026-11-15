@@ -64,6 +64,7 @@ import org.apache.cloudstack.framework.async.AsyncCallbackDispatcher;
 import org.apache.cloudstack.framework.async.AsyncCompletionCallback;
 import org.apache.cloudstack.framework.async.AsyncRpcContext;
 import org.apache.cloudstack.framework.config.dao.ConfigurationDao;
+import org.apache.cloudstack.secret.PassphraseVO;
 import org.apache.cloudstack.secret.dao.PassphraseDao;
 import org.apache.cloudstack.storage.RemoteHostEndPoint;
 import org.apache.cloudstack.storage.command.CommandResult;
@@ -159,6 +160,10 @@ import com.cloud.vm.VirtualMachine;
 @Component
 public class VolumeServiceImpl implements VolumeService {
     protected Logger logger = LogManager.getLogger(getClass());
+
+    // Mirrors the name qemu gives the format, which is what the KVM agent reports back for a volume it encrypts
+    protected static final String LUKS_ENCRYPT_FORMAT = "luks";
+
     @Inject
     protected AgentManager agentMgr;
     @Inject
@@ -218,7 +223,7 @@ public class VolumeServiceImpl implements VolumeService {
     @Inject
     private SnapshotApiService snapshotApiService;
     @Inject
-    private PassphraseDao passphraseDao;
+    protected PassphraseDao passphraseDao;
     @Inject
     protected DiskOfferingDao diskOfferingDao;
 
@@ -1755,12 +1760,54 @@ public class VolumeServiceImpl implements VolumeService {
         newVol.setPoolType(pool.getPoolType());
         newVol.setLastPoolId(lastPoolId);
         newVol.setPodId(pool.getPodId());
-        if (volume.getPassphraseId() != null) {
-            newVol.setPassphraseId(volume.getPassphraseId());
-            newVol.setEncryptFormat(volume.getEncryptFormat());
+        if (isEncryptedByItsDiskOffering(newVol, volume)) {
+            if (volume.getPassphraseId() != null) {
+                newVol.setPassphraseId(volume.getPassphraseId());
+                newVol.setEncryptFormat(volume.getEncryptFormat());
+            } else {
+                // A copy that is only now becoming encrypted needs a key of its own, as the source keeps its plaintext
+                // bytes until the migration has succeeded.
+                newVol.setPassphraseId(passphraseDao.persist(new PassphraseVO(true)).getId());
+                newVol.setEncryptFormat(LUKS_ENCRYPT_FORMAT);
+            }
         }
         newVol.setLastId(volume.getId());
         return volDao.persist(newVol);
+    }
+
+    /**
+     * Whether the copy is to hold encrypted bytes. The disk offering the copy carries is what decides that, rather than
+     * the encryption of the volume it is copied from: the two differ exactly when the migration is also moving the
+     * volume onto an offering with a different encryption setting.
+     *
+     * An offering that has been removed can no longer be read, so the copy then keeps the encryption of its source,
+     * which is the only other thing that says anything about the bytes.
+     */
+    private boolean isEncryptedByItsDiskOffering(VolumeVO destination, Volume source) {
+        DiskOfferingVO diskOffering = diskOfferingDao.findByIdIncludingRemoved(destination.getDiskOfferingId());
+        return diskOffering != null ? diskOffering.getEncrypt() : source.getPassphraseId() != null;
+    }
+
+    /**
+     * A key minted for the copy has nothing to decrypt once the copy never happened, and the leftover destination row
+     * must not keep claiming to be encrypted either.
+     */
+    protected void discardUnusedDestinationPassphrase(VolumeInfo srcVolume, VolumeVO destVolume) {
+        if (destVolume == null || destVolume.getPassphraseId() == null
+                || destVolume.getPassphraseId().equals(srcVolume.getPassphraseId())) {
+            return;
+        }
+
+        Long passphraseId = destVolume.getPassphraseId();
+        destVolume.setPassphraseId(null);
+        destVolume.setEncryptFormat(null);
+        volDao.update(destVolume.getId(), destVolume);
+
+        List<VolumeVO> volumes = volDao.listVolumesByPassphraseId(passphraseId);
+        if (volumes == null || volumes.isEmpty()) {
+            logger.debug("Deleting passphrase {} allocated for the abandoned copy of volume {}", passphraseId, srcVolume);
+            passphraseDao.remove(passphraseId);
+        }
     }
 
     private class CopyVolumeContext<T> extends AsyncRpcContext<T> {
@@ -1909,6 +1956,7 @@ public class VolumeServiceImpl implements VolumeService {
 
         AsyncCallFuture<VolumeApiResult> future = new AsyncCallFuture<>();
         VolumeApiResult res = new VolumeApiResult(srcVolume);
+        VolumeVO destVol = null;
         try {
             if (!snapshotMgr.canOperateOnVolume(srcVolume)) {
                 logger.debug("There are snapshots creating on this volume, can not move this volume");
@@ -1918,7 +1966,7 @@ public class VolumeServiceImpl implements VolumeService {
                 return future;
             }
 
-            VolumeVO destVol = duplicateVolumeOnAnotherStorage(srcVolume, (StoragePool)destStore);
+            destVol = duplicateVolumeOnAnotherStorage(srcVolume, (StoragePool)destStore);
             VolumeInfo destVolume = volFactory.getVolume(destVol.getId(), destStore);
             destVolume.processEvent(Event.MigrationCopyRequested);
             srcVolume.processEvent(Event.MigrationRequested);
@@ -1932,6 +1980,7 @@ public class VolumeServiceImpl implements VolumeService {
             if(logger.isDebugEnabled()) {
                 logger.debug("Failed to copy volume.", e);
             }
+            discardUnusedDestinationPassphrase(srcVolume, destVol);
             res.setResult(e.toString());
             future.complete(res);
         }
