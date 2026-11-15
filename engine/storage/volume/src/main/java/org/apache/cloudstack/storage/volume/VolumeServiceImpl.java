@@ -1739,13 +1739,7 @@ public class VolumeServiceImpl implements VolumeService {
         return null;
     }
 
-    /**
-     * @param encryptDestination whether the copy is to be encrypted, or {@code null} to carry over whatever the source
-     *                           volume has. Turning encryption on means a key of its own for the copy, because the
-     *                           source keeps its plaintext bytes until the migration succeeds; turning it off means no
-     *                           key at all, so that nothing claims the copy is encrypted once it is not.
-     */
-    protected VolumeVO duplicateVolumeOnAnotherStorage(Volume volume, StoragePool pool, Boolean encryptDestination) {
+    protected VolumeVO duplicateVolumeOnAnotherStorage(Volume volume, StoragePool pool) {
         Long lastPoolId = volume.getPoolId();
         String folder = pool.getPath();
         // For SMB, pool credentials are also stored in the uri query string.  We trim the query string
@@ -1766,25 +1760,32 @@ public class VolumeServiceImpl implements VolumeService {
         newVol.setPoolType(pool.getPoolType());
         newVol.setLastPoolId(lastPoolId);
         newVol.setPodId(pool.getPodId());
-        if (volume.getPassphraseId() != null && !Boolean.FALSE.equals(encryptDestination)) {
-            newVol.setPassphraseId(volume.getPassphraseId());
-            newVol.setEncryptFormat(volume.getEncryptFormat());
-        } else if (volume.getPassphraseId() == null && Boolean.TRUE.equals(encryptDestination)) {
-            newVol.setPassphraseId(passphraseDao.persist(new PassphraseVO(true)).getId());
-            newVol.setEncryptFormat(LUKS_ENCRYPT_FORMAT);
+        if (isEncryptedByItsDiskOffering(newVol, volume)) {
+            if (volume.getPassphraseId() != null) {
+                newVol.setPassphraseId(volume.getPassphraseId());
+                newVol.setEncryptFormat(volume.getEncryptFormat());
+            } else {
+                // A copy that is only now becoming encrypted needs a key of its own, as the source keeps its plaintext
+                // bytes until the migration has succeeded.
+                newVol.setPassphraseId(passphraseDao.persist(new PassphraseVO(true)).getId());
+                newVol.setEncryptFormat(LUKS_ENCRYPT_FORMAT);
+            }
         }
         newVol.setLastId(volume.getId());
         return volDao.persist(newVol);
     }
 
     /**
-     * The storage layer can only re-encrypt while it converts an image between two pools, so anything that copies by
-     * other means has to refuse rather than quietly hand back a copy in the state the caller did not ask for.
+     * Whether the copy is to hold encrypted bytes. The disk offering the copy carries is what decides that, rather than
+     * the encryption of the volume it is copied from: the two differ exactly when the migration is also moving the
+     * volume onto an offering with a different encryption setting.
+     *
+     * An offering that has been removed can no longer be read, so the copy then keeps the encryption of its source,
+     * which is the only other thing that says anything about the bytes.
      */
-    private void rejectEncryptionChange(Boolean encryptDestination, String copyMethod) {
-        if (encryptDestination != null) {
-            throw new CloudRuntimeException(String.format("Changing volume encryption is not possible through %s", copyMethod));
-        }
+    private boolean isEncryptedByItsDiskOffering(VolumeVO destination, Volume source) {
+        DiskOfferingVO diskOffering = diskOfferingDao.findByIdIncludingRemoved(destination.getDiskOfferingId());
+        return diskOffering != null ? diskOffering.getEncrypt() : source.getPassphraseId() != null;
     }
 
     /**
@@ -1929,11 +1930,6 @@ public class VolumeServiceImpl implements VolumeService {
 
     @Override
     public AsyncCallFuture<VolumeApiResult> copyVolume(VolumeInfo srcVolume, DataStore destStore) {
-        return copyVolume(srcVolume, destStore, null);
-    }
-
-    @Override
-    public AsyncCallFuture<VolumeApiResult> copyVolume(VolumeInfo srcVolume, DataStore destStore, Boolean encryptDestination) {
         DataStore srcStore = srcVolume.getDataStore();
         if (logger.isDebugEnabled()) {
             String srcRole = (srcStore != null && srcStore.getRole() != null ? srcVolume.getDataStore().getRole().toString() : "<unknown role>");
@@ -1944,18 +1940,15 @@ public class VolumeServiceImpl implements VolumeService {
         }
 
         if (srcVolume.getState() == Volume.State.Uploaded) {
-            rejectEncryptionChange(encryptDestination, "a volume uploaded to secondary storage");
             return copyVolumeFromImageToPrimary(srcVolume, destStore);
         }
 
         if (destStore.getRole() == DataStoreRole.Image) {
-            rejectEncryptionChange(encryptDestination, "a copy to secondary storage");
             return copyVolumeFromPrimaryToImage(srcVolume, destStore);
         }
 
         if (srcStore.getRole() == DataStoreRole.Primary && destStore.getRole() == DataStoreRole.Primary && ((PrimaryDataStore) destStore).isManaged() &&
                 requiresNewManagedVolumeInDestStore((PrimaryDataStore) srcStore, (PrimaryDataStore) destStore)) {
-            rejectEncryptionChange(encryptDestination, "a copy into managed storage");
             return copyManagedVolume(srcVolume, destStore);
         }
 
@@ -1973,7 +1966,7 @@ public class VolumeServiceImpl implements VolumeService {
                 return future;
             }
 
-            destVol = duplicateVolumeOnAnotherStorage(srcVolume, (StoragePool)destStore, encryptDestination);
+            destVol = duplicateVolumeOnAnotherStorage(srcVolume, (StoragePool)destStore);
             VolumeInfo destVolume = volFactory.getVolume(destVol.getId(), destStore);
             destVolume.processEvent(Event.MigrationCopyRequested);
             srcVolume.processEvent(Event.MigrationRequested);
@@ -2143,7 +2136,7 @@ public class VolumeServiceImpl implements VolumeService {
                 return future;
             }
 
-            VolumeVO destVol = duplicateVolumeOnAnotherStorage(srcVolume, (StoragePool)destStore, null);
+            VolumeVO destVol = duplicateVolumeOnAnotherStorage(srcVolume, (StoragePool)destStore);
             VolumeInfo destVolume = volFactory.getVolume(destVol.getId(), destStore);
 
             // Create a volume on managed storage.

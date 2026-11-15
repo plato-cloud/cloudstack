@@ -1903,6 +1903,27 @@ public class VolumeApiServiceImplTest {
     }
 
     @Test
+    public void testApplyNewDiskOfferingBeforeMigrationMovesTheVolumeOntoTheNewOffering() {
+        VolumeVO volume = encryptionStateVolume(null, 1L);
+        Mockito.when(volume.getId()).thenReturn(11L);
+
+        Long previousDiskOfferingId = volumeApiServiceImpl.applyNewDiskOfferingBeforeMigration(volume, encryptionDiskOffering(2L, true));
+
+        Assert.assertEquals(Long.valueOf(1L), previousDiskOfferingId);
+        Mockito.verify(volumeDaoMock).updateDiskOffering(11L, 2L);
+    }
+
+    @Test
+    public void testApplyNewDiskOfferingBeforeMigrationLeavesAnUnchangedOfferingAlone() {
+        VolumeVO volume = encryptionStateVolume(null, 1L);
+
+        Assert.assertNull(volumeApiServiceImpl.applyNewDiskOfferingBeforeMigration(volume, null));
+        Assert.assertNull(volumeApiServiceImpl.applyNewDiskOfferingBeforeMigration(volume, encryptionDiskOffering(1L, true)));
+
+        Mockito.verify(volumeDaoMock, Mockito.never()).updateDiskOffering(Mockito.anyLong(), Mockito.anyLong());
+    }
+
+    @Test
     public void testValidationsForCheckVolumeAPI() {
         VolumeVO volume = mock(VolumeVO.class);
 

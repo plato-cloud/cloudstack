@@ -113,12 +113,6 @@ public interface VolumeOrchestrationService {
 
     Volume migrateVolume(Volume volume, StoragePool destPool) throws StorageUnavailableException;
 
-    /**
-     * @param encryptDestination whether the volume is to be encrypted on the destination pool; {@code null} leaves it
-     *                           with the encryption state it already has.
-     */
-    Volume migrateVolume(Volume volume, StoragePool destPool, Boolean encryptDestination) throws StorageUnavailableException;
-
     Volume liveMigrateVolume(Volume volume, StoragePool destPool);
 
     void cleanupStorageJobs();

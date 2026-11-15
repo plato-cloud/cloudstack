@@ -376,13 +376,20 @@ public class VolumeServiceTest extends TestCase{
         return volume;
     }
 
-    private VolumeVO duplicateOnPool(VolumeVO source, Boolean encryptDestination) {
+    private VolumeVO duplicateOnPool(VolumeVO source, Boolean diskOfferingEncrypts) {
         StoragePool pool = Mockito.mock(StoragePool.class);
         Mockito.when(pool.getPoolType()).thenReturn(Storage.StoragePoolType.NetworkFilesystem);
         Mockito.when(pool.getId()).thenReturn(2L);
         Mockito.doAnswer(invocation -> invocation.getArgument(0)).when(volumeDaoMock).persist(Mockito.any(VolumeVO.class));
 
-        return volumeServiceImplSpy.duplicateVolumeOnAnotherStorage(source, pool, encryptDestination);
+        DiskOfferingVO diskOffering = null;
+        if (diskOfferingEncrypts != null) {
+            diskOffering = Mockito.mock(DiskOfferingVO.class);
+            Mockito.when(diskOffering.getEncrypt()).thenReturn(diskOfferingEncrypts);
+        }
+        Mockito.when(diskOfferingDaoMock.findByIdIncludingRemoved(source.getDiskOfferingId())).thenReturn(diskOffering);
+
+        return volumeServiceImplSpy.duplicateVolumeOnAnotherStorage(source, pool);
     }
 
     @Test
@@ -408,10 +415,24 @@ public class VolumeServiceTest extends TestCase{
 
     @Test
     public void duplicateVolumeOnAnotherStorageSharesThePassphraseWhenEncryptionIsUnchanged() {
-        VolumeVO destination = duplicateOnPool(sourceVolume(5L, "luks"), null);
+        VolumeVO destination = duplicateOnPool(sourceVolume(5L, "luks"), Boolean.TRUE);
 
         Assert.assertEquals(Long.valueOf(5L), destination.getPassphraseId());
         Assert.assertEquals("luks", destination.getEncryptFormat());
+        Mockito.verifyNoInteractions(passphraseDaoMock);
+    }
+
+    @Test
+    public void duplicateVolumeOnAnotherStorageFallsBackToTheSourceWhenTheDiskOfferingIsGone() {
+        VolumeVO encrypted = duplicateOnPool(sourceVolume(5L, "luks"), null);
+
+        Assert.assertEquals(Long.valueOf(5L), encrypted.getPassphraseId());
+        Assert.assertEquals("luks", encrypted.getEncryptFormat());
+
+        VolumeVO plaintext = duplicateOnPool(sourceVolume(null, null), null);
+
+        Assert.assertNull(plaintext.getPassphraseId());
+        Assert.assertNull(plaintext.getEncryptFormat());
         Mockito.verifyNoInteractions(passphraseDaoMock);
     }
 

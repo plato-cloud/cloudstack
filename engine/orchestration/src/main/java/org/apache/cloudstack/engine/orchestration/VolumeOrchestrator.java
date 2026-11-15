@@ -1422,12 +1422,6 @@ public class VolumeOrchestrator extends ManagerBase implements VolumeOrchestrati
     @Override
     @DB
     public Volume migrateVolume(Volume volume, StoragePool destPool) throws StorageUnavailableException {
-        return migrateVolume(volume, destPool, null);
-    }
-
-    @Override
-    @DB
-    public Volume migrateVolume(Volume volume, StoragePool destPool, Boolean encryptDestination) throws StorageUnavailableException {
         String volumeToString = getVolumeIdentificationInfos(volume);
 
         VolumeInfo vol = volFactory.getVolume(volume.getId());
@@ -1441,7 +1435,7 @@ public class VolumeOrchestrator extends ManagerBase implements VolumeOrchestrati
         checkConcurrentJobsPerDatastoreThreshhold(destPool);
 
         DataStore dataStoreTarget = dataStoreMgr.getDataStore(destPool.getId(), DataStoreRole.Primary);
-        AsyncCallFuture<VolumeApiResult> future = volService.copyVolume(vol, dataStoreTarget, encryptDestination);
+        AsyncCallFuture<VolumeApiResult> future = volService.copyVolume(vol, dataStoreTarget);
         try {
             VolumeApiResult result = future.get();
             if (result.isFailed()) {

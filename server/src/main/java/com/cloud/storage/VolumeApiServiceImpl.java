@@ -3937,23 +3937,47 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
 
     private Volume orchestrateMigrateVolume(VolumeVO volume, StoragePool destPool, boolean liveMigrateVolume, DiskOfferingVO newDiskOffering) {
         Volume newVol = null;
+        Long diskOfferingIdToRestore = applyNewDiskOfferingBeforeMigration(volume, newDiskOffering);
         try {
             if (liveMigrateVolume) {
                 newVol = liveMigrateVolume(volume, destPool);
             } else {
-                newVol = _volumeMgr.migrateVolume(volume, destPool, getRequestedEncryptionChange(volume, newDiskOffering));
+                newVol = _volumeMgr.migrateVolume(volume, destPool);
             }
             if (newDiskOffering != null) {
                 _volsDao.updateDiskOffering(newVol.getId(), newDiskOffering.getId());
             }
+            diskOfferingIdToRestore = null;
         } catch (StorageUnavailableException e) {
             logger.debug("Failed to migrate volume", e);
             throw new CloudRuntimeException(e.getMessage());
         } catch (Exception e) {
             logger.debug("Failed to migrate volume", e);
             throw new CloudRuntimeException(e.getMessage());
+        } finally {
+            if (diskOfferingIdToRestore != null) {
+                _volsDao.updateDiskOffering(volume.getId(), diskOfferingIdToRestore);
+            }
         }
         return newVol;
+    }
+
+    /**
+     * Moves the volume onto the offering it is being migrated to, before the copy on the destination pool is made from
+     * it. The copy inherits the offering, and the storage layer reads the offering to decide whether the copy holds
+     * encrypted bytes, so it has to be in place first. A volume that is not copied after all would be left claiming an
+     * encryption its bytes do not have, so the caller puts the previous offering back unless the migration completes.
+     *
+     * @return the disk offering to restore should the migration not happen, or {@code null} when nothing was changed
+     */
+    protected Long applyNewDiskOfferingBeforeMigration(VolumeVO volume, DiskOfferingVO newDiskOffering) {
+        if (newDiskOffering == null || newDiskOffering.getId() == volume.getDiskOfferingId()) {
+            return null;
+        }
+
+        Long previousDiskOfferingId = volume.getDiskOfferingId();
+        _volsDao.updateDiskOffering(volume.getId(), newDiskOffering.getId());
+        return previousDiskOfferingId;
     }
 
     @DB

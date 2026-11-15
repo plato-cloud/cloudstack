@@ -87,12 +87,6 @@ public interface VolumeService {
 
     AsyncCallFuture<VolumeApiResult> copyVolume(VolumeInfo srcVolume, DataStore destStore);
 
-    /**
-     * @param encryptDestination whether the copy on the destination store is to be encrypted; {@code null} leaves it
-     *                           with the encryption state of the source volume.
-     */
-    AsyncCallFuture<VolumeApiResult> copyVolume(VolumeInfo srcVolume, DataStore destStore, Boolean encryptDestination);
-
     AsyncCallFuture<VolumeApiResult> migrateVolume(VolumeInfo srcVolume, DataStore destStore);
 
     AsyncCallFuture<CommandResult> migrateVolumes(Map<VolumeInfo, DataStore> volumeMap, VirtualMachineTO vmTo, Host srcHost, Host destHost);
