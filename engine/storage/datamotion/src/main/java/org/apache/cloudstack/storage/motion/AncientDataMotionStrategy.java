@@ -96,6 +96,21 @@ public class AncientDataMotionStrategy implements DataMotionStrategy {
             StoragePoolType.RBD
     );
 
+    /**
+     * Pool types between which an encrypted volume may be copied straight from one primary pool to the other. That direct copy is
+     * the only transfer that carries the passphrases: the two-leg copy through secondary storage has no parameter for them, and
+     * the image would have to land on the staging store as plaintext even if it had.
+     *
+     * These are the file-based pool types the KVM storage adaptor drives with qemu-img, so it can attach both secrets to the
+     * conversion. RBD is deliberately absent, even though an unencrypted volume may bypass secondary storage on it, because
+     * qemu-img cannot carry the secret through an RBD endpoint.
+     */
+    protected static final List<StoragePoolType> SUPPORTED_POOL_TYPES_TO_BYPASS_SECONDARY_STORE_WITH_ENCRYPTION = Arrays.asList(
+            StoragePoolType.NetworkFilesystem,
+            StoragePoolType.Filesystem,
+            StoragePoolType.SharedMountPoint
+    );
+
     @Inject
     EndPointSelector selector;
     @Inject
@@ -364,8 +379,14 @@ public class AncientDataMotionStrategy implements DataMotionStrategy {
 
         Scope destScope = getZoneScope(destData.getDataStore().getScope());
         DataStore cacheStore = cacheMgr.getCacheStorage(destScope);
-        boolean bypassSecondaryStorage = canBypassSecondaryStorage(srcData, destData);
         boolean encryptionRequired = anyVolumeRequiresEncryption(srcData, destData);
+        boolean bypassSecondaryStorage = canBypassSecondaryStorage(srcData, destData, encryptionRequired);
+
+        if (encryptionRequired && !(bypassSecondaryStorage && cacheStore == null)) {
+            throw new CloudRuntimeException(String.format("Cannot migrate encrypted volume %s: its passphrase only travels with a direct copy"
+                    + " between the two primary pools, and %s. Staging it on secondary storage would leave the destination image unreadable.",
+                    srcData.getUuid(), describeWhyDirectCopyIsUnavailable(srcData, destData, cacheStore)));
+        }
 
         if (cacheStore == null) {
             if (bypassSecondaryStorage) {
@@ -466,7 +487,7 @@ public class AncientDataMotionStrategy implements DataMotionStrategy {
         }
     }
 
-    private boolean canBypassSecondaryStorage(DataObject srcData, DataObject destData) {
+    protected boolean canBypassSecondaryStorage(DataObject srcData, DataObject destData, boolean encryptionRequired) {
         if (srcData instanceof VolumeInfo) {
             if (((VolumeInfo)srcData).isDirectDownload()) {
                 return true;
@@ -484,11 +505,13 @@ public class AncientDataMotionStrategy implements DataMotionStrategy {
                 Scope srcDataStoreScope = srcData.getDataStore().getScope();
                 Scope destDataStoreScope = destData.getDataStore().getScope();
                 logger.info("srcDataStoreScope: {}, srcData pool type: {}; destDataStoreScope: {}, destData pool type: {}",
-                        srcDataStoreScope, ((VolumeInfo)srcData).getStoragePoolType(), destDataStoreScope, ((VolumeInfo)destData).getStoragePoolType());
+                        srcDataStoreScope, getStoragePoolType(srcData), destDataStoreScope, getStoragePoolType(destData));
 
+                List<StoragePoolType> supportedPoolTypes = encryptionRequired ?
+                        SUPPORTED_POOL_TYPES_TO_BYPASS_SECONDARY_STORE_WITH_ENCRYPTION : SUPPORTED_POOL_TYPES_TO_BYPASS_SECONDARY_STORE;
                 if (srcDataStoreScope != null && destDataStoreScope != null &&
-                        SUPPORTED_POOL_TYPES_TO_BYPASS_SECONDARY_STORE.contains(((VolumeInfo)srcData).getStoragePoolType()) &&
-                        SUPPORTED_POOL_TYPES_TO_BYPASS_SECONDARY_STORE.contains(((VolumeInfo)destData).getStoragePoolType())) {
+                        supportedPoolTypes.contains(getStoragePoolType(srcData)) &&
+                        supportedPoolTypes.contains(getStoragePoolType(destData))) {
 
                     return canDirectlyCopyBetweenDataStoreScopes(srcDataStoreScope, destDataStoreScope);
                 }
@@ -496,6 +519,61 @@ public class AncientDataMotionStrategy implements DataMotionStrategy {
         }
 
         return false;
+    }
+
+    /**
+     * Spells out which part of the direct primary-to-primary copy is unavailable, so an operator is told why an encrypted volume
+     * will not move instead of having to read it out of a qemu-img failure on the agent.
+     */
+    protected String describeWhyDirectCopyIsUnavailable(DataObject srcData, DataObject destData, DataStore cacheStore) {
+        if (cacheStore != null) {
+            return String.format("the destination zone stages every copy through image cache store %s", cacheStore.getName());
+        }
+
+        if (!(srcData instanceof VolumeInfo) || !(destData instanceof VolumeInfo)) {
+            return "the copy is not between two volumes on primary storage";
+        }
+
+        VolumeInfo srcVolume = (VolumeInfo) srcData;
+        VolumeInfo destVolume = (VolumeInfo) destData;
+
+        if (Hypervisor.HypervisorType.XenServer.equals(srcVolume.getHypervisorType()) ||
+                Hypervisor.HypervisorType.XenServer.equals(destVolume.getHypervisorType())) {
+            return "XenServer always moves a volume through secondary storage";
+        }
+
+        if (!SUPPORTED_POOL_TYPES_TO_BYPASS_SECONDARY_STORE_WITH_ENCRYPTION.contains(getStoragePoolType(srcData)) ||
+                !SUPPORTED_POOL_TYPES_TO_BYPASS_SECONDARY_STORE_WITH_ENCRYPTION.contains(getStoragePoolType(destData))) {
+            return String.format("it is only supported between the %s pool types, and this migration is from %s to %s",
+                    SUPPORTED_POOL_TYPES_TO_BYPASS_SECONDARY_STORE_WITH_ENCRYPTION, getStoragePoolType(srcData), getStoragePoolType(destData));
+        }
+
+        return String.format("no single host reaches both pools: the source pool scope is %s and the destination pool scope is %s",
+                describeScope(srcData.getDataStore().getScope()), describeScope(destData.getDataStore().getScope()));
+    }
+
+    private String describeScope(Scope scope) {
+        return scope == null ? "unknown" : String.format("%s %s", scope.getScopeType(), scope.getScopeId());
+    }
+
+    /**
+     * The type of the pool a volume currently sits on.
+     *
+     * {@link VolumeInfo#getStoragePoolType()} reads {@code volumes.pool_type}, a denormalised copy of the pool's own type that
+     * is only written when a volume is created on a pool or duplicated onto one by a migration. Rows older than that column
+     * still hold NULL, and the in-memory value {@code VolumeDataFactoryImpl} fills in from the pool is dropped again as soon as
+     * a state transition reloads the row. The pool is the authoritative source, so ask it first and keep the column only as a
+     * fallback for a volume that is not sitting on a primary pool.
+     */
+    protected StoragePoolType getStoragePoolType(DataObject dataObject) {
+        DataStore dataStore = dataObject.getDataStore();
+        if (dataStore instanceof StoragePool) {
+            StoragePoolType poolType = ((StoragePool) dataStore).getPoolType();
+            if (poolType != null) {
+                return poolType;
+            }
+        }
+        return dataObject instanceof VolumeInfo ? ((VolumeInfo) dataObject).getStoragePoolType() : null;
     }
 
     private boolean canDirectlyCopyBetweenDataStoreScopes(Scope srcDataStoreScope, Scope destDataStoreScope) {
