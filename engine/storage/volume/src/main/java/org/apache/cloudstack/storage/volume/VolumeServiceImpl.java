@@ -1770,6 +1770,9 @@ public class VolumeServiceImpl implements VolumeService {
                 newVol.setPassphraseId(passphraseDao.persist(new PassphraseVO(true)).getId());
                 newVol.setEncryptFormat(LUKS_ENCRYPT_FORMAT);
             }
+        } else {
+            newVol.setPassphraseId(null);
+            newVol.setEncryptFormat(null);
         }
         newVol.setLastId(volume.getId());
         return volDao.persist(newVol);
