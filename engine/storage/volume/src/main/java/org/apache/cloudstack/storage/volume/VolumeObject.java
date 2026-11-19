@@ -692,7 +692,9 @@ public class VolumeObject implements VolumeInfo {
         volumeVo.setPath(newVolume.getPath());
         Long newVolumeSize = newVolume.getSize();
 
-        volumeVo.setEncryptFormat(newVolume.getEncryptFormat());
+        if (newVolume.getEncryptFormat() != null) {
+            volumeVo.setEncryptFormat(newVolume.getEncryptFormat());
+        }
 
         if (newVolumeSize != null && setVolumeSize) {
             volumeVo.setSize(newVolumeSize);
