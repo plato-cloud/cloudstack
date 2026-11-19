@@ -482,6 +482,30 @@ public class VolumeObjectTest extends TestCase{
     }
 
     @Test
+    public void validateUpdateVolumeInfoEncryptFormatNullDoNotSetEncryptFormat(){
+        Mockito.doReturn(null).when(volumeObjectToMock).getEncryptFormat();
+        Mockito.doNothing().when(volumeObjectSpy).setVolumeFormat(Mockito.any(), Mockito.anyBoolean(), Mockito.any());
+        Mockito.doReturn(true).when(volumeDaoMock).update(Mockito.anyLong(), Mockito.any());
+
+        volumeObjectSpy.updateVolumeInfo(volumeObjectToMock, volumeVoMock, false, false);
+
+        Mockito.verify(volumeVoMock, Mockito.never()).setEncryptFormat(Mockito.any());
+        Mockito.verify(volumeDaoMock, Mockito.times(1)).update(Mockito.anyLong(), Mockito.any());
+    }
+
+    @Test
+    public void validateUpdateVolumeInfoEncryptFormatNotNullSetEncryptFormat(){
+        Mockito.doReturn("LUKS").when(volumeObjectToMock).getEncryptFormat();
+        Mockito.doNothing().when(volumeObjectSpy).setVolumeFormat(Mockito.any(), Mockito.anyBoolean(), Mockito.any());
+        Mockito.doReturn(true).when(volumeDaoMock).update(Mockito.anyLong(), Mockito.any());
+
+        volumeObjectSpy.updateVolumeInfo(volumeObjectToMock, volumeVoMock, false, false);
+
+        Mockito.verify(volumeVoMock, Mockito.times(1)).setEncryptFormat("LUKS");
+        Mockito.verify(volumeDaoMock, Mockito.times(1)).update(Mockito.anyLong(), Mockito.any());
+    }
+
+    @Test
     public void validateHandleProcessEventAnswerCreateObjectAnswerIsNotPrimaryDataStore(){
         Mockito.doReturn(false).when(volumeObjectSpy).isPrimaryDataStore();
         volumeObjectSpy.handleProcessEventAnswer(new CreateObjectAnswer(volumeObjectToMock), false);
